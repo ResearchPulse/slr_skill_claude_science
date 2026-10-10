@@ -1,0 +1,35 @@
+{
+  "name": "slr-skill",
+  "version": "1.0.0",
+  "description": "One-command installer for the /slr systematic literature review skill + MCP connector (Claude Code, Claude Science, Claude Desktop).",
+  "bin": {
+    "slr-skill": "bin/install.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/*.py",
+    "references/",
+    "SKILL.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16.7"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "skill",
+    "mcp",
+    "systematic-review",
+    "slr"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ResearchPulse/slr_skill_claude_science.git"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ResearchPulse/slr_skill_claude_science#readme",
+  "bugs": {
+    "url": "https://github.com/ResearchPulse/slr_skill_claude_science/issues"
+  }
+}
