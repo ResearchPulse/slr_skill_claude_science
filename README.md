@@ -262,6 +262,14 @@ slr_skill_claude_science/
 └── README.md
 ```
 
+## Cập nhật Agent Task API
+
+Skill và MCP tuân theo `AI_AGENT_TASK_API_CONTRACT.md`: agent token được giới hạn theo agent, project và reviewer workspace; danh sách task được lấy qua cursor; mỗi task dùng `protocolSnapshot` để chấm theo bộ tiêu chí tại thời điểm giao.
+
+Chỉ lấy Markdown khi task có `stage: FULL_TEXT` và có `markdownPath`. Task `TITLE_ABSTRACT` chỉ được đánh giá từ title/abstract; MCP và CLI tự kiểm tra stage trước khi gọi endpoint. Trạng thái trích xuất `202` tuân theo `Retry-After`; Markdown `PARTIAL` vẫn có thể dùng và cần ghi rõ mức bao phủ.
+
+Kết quả agent là recommendation riêng, không tạo screening decision của reviewer. Reviewer lấy/cấp lại token trong review workspace; nếu token bị rotate, cập nhật lại token trong cấu hình MCP và profile `/slr`.
+
 <div align="center">
 <sub>Made for <b>ResearchPulse</b> · Phát hiện lỗi? <a href="https://github.com/ResearchPulse/slr_skill_claude_science/issues">Mở issue</a></sub>
 </div>

@@ -3,7 +3,8 @@
 
 Runs on the host, launched by Claude Science as a connector, so it reaches the
 backend directly (e.g. http://localhost:5000/api) without the sandbox proxy.
-Reads stay in the skill's slr.py; this server submits votes and checks status.
+Reads use the reviewer-scoped Agent Task API through the skill's slr.py client; this
+server submits recommendations and exposes task status/context.
 
 Stdlib only. Config comes from the connector's env (API_BASE_URL, AGENT_TOKEN)
 or from slr.py's stored profile (~/.config/slr).
@@ -52,8 +53,9 @@ TOOLS = [
     {
         "name": "list_tasks",
         "title": "List SLR tasks",
-        "description": ("List tasks assigned to this agent (all pages) plus the project's research "
-                        "questions and inclusion/exclusion criteria. Fallback for /slr list when "
+        "description": ("List tasks assigned to this reviewer workspace's agent (all cursor pages), "
+                        "including each task's stage and protocolSnapshot. The page also includes "
+                        "current project context. Fallback for /slr list when "
                         "direct API reads from the sandbox fail."),
         "inputSchema": {
             "type": "object",
@@ -66,8 +68,10 @@ TOOLS = [
     {
         "name": "get_markdown",
         "title": "Get paper full text",
-        "description": ("Full-text Markdown of a task's paper. Waits per Retry-After while extraction "
-                        "is pending (up to max_wait seconds). Status: ready / pending / unavailable."),
+        "description": ("Full-text Markdown for a FULL_TEXT task only, and only when the task has "
+                        "markdownPath. Never call for TITLE_ABSTRACT tasks. Waits per Retry-After "
+                        "while extraction is pending (up to max_wait seconds). Status: ready / "
+                        "pending / unavailable."),
         "inputSchema": {
             "type": "object",
             "properties": {"task_id": {"type": "string"},
@@ -80,7 +84,8 @@ TOOLS = [
     {
         "name": "get_task",
         "title": "Get SLR task status",
-        "description": "Return one task's status (ASSIGNED / COMPLETED) and result, to verify a submission.",
+        "description": ("Return the reviewer-scoped task, stage, protocolSnapshot, markdownPath, "
+                        "paper metadata, and result. Use it to refresh a task or verify submission."),
         "inputSchema": {
             "type": "object",
             "properties": {"task_id": {"type": "string"}},
@@ -141,10 +146,7 @@ def call_tool(name, args):
                     "isError": False}
         if name == "get_task":
             data = Client().get_task(str(args["task_id"]))
-            t = data.get("task") or {}
-            return tool_result({"taskId": t.get("id"), "status": t.get("status"),
-                                "completedAt": t.get("completedAt"), "result": t.get("result"),
-                                "paperTitle": t.get("paperTitle")})
+            return tool_result(data)
         if name == "connection_test":
             c = Client(retries=0)
             project, tasks = c.list_tasks(status="any")

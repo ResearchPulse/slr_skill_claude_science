@@ -8,7 +8,8 @@ Stdlib only; usable as a CLI or imported in a Python kernel:
     c = Client()                      # reads config/token (never prints the token)
     project, tasks = c.list_tasks()
 
-Configuration — one profile per project (a token is scoped to one project):
+Configuration — one profile per reviewer workspace/project (the token is scoped to one agent,
+reviewer, and project):
   config set-url https://<host>/api [--profile P]   save server URL
   config set-token [--profile P] [--stdin]          save token (hidden prompt, chmod 600)
   config use P                                      switch active profile
@@ -250,7 +251,21 @@ class Client:
         return self._get_json(f"/agent/v1/tasks/{urllib.parse.quote(task_id)}")
 
     def markdown(self, task_id, max_wait=60):
-        path = f"/agent/v1/tasks/{urllib.parse.quote(task_id)}/markdown"
+        result = self.get_task(task_id)
+        task = result.get("task") or result
+        if task.get("stage") != "FULL_TEXT":
+            raise ApiError(409, "FULLTEXT_STAGE_REQUIRED",
+                           "Markdown is available only for FULL_TEXT tasks.", EXIT_UNAVAILABLE)
+        path = task.get("markdownPath")
+        if not path:
+            raise ApiError(409, "FULLTEXT_UNAVAILABLE",
+                           "This FULL_TEXT task has no markdownPath.", EXIT_UNAVAILABLE)
+        if not isinstance(path, str) or not path.startswith(("/agent/v1/", "/api/agent/v1/")):
+            raise ApiError(None, "BAD_RESPONSE", "Task returned an invalid markdownPath.")
+        api_path = path[len("/api"):] if path.startswith("/api/") else path
+        expected_path = f"/agent/v1/tasks/{urllib.parse.quote(task_id)}/markdown"
+        if api_path != expected_path:
+            raise ApiError(None, "BAD_RESPONSE", "Task returned a markdownPath for a different endpoint.")
         deadline = time.time() + max_wait
         while True:
             status, headers, raw = self._request("GET", path, accept="text/markdown")

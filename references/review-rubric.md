@@ -77,5 +77,11 @@ unsupported statement will be flagged.
 `title_abstract`. Use `null` for fields the paper does not report. Keep evidence snippets
 short (one line each) so the body stays well under 30 KB.
 
-Criterion ids: number the project's criteria in the order the API returns them
+Set `basis` according to the task stage and the content actually reviewed. A
+`TITLE_ABSTRACT` task always uses `title_abstract`; do not fetch Markdown for it. For a
+`FULL_TEXT` task, use `partial_full_text` when the API reports `PARTIAL`, and `full_text`
+when extraction completed normally. Assess against that task's `protocolSnapshot`, which
+captures the criteria at assignment time.
+
+Criterion ids: number the task's `protocolSnapshot` criteria in their API order
 (`IC1, IC2…` for inclusionCriteria, `EC1, EC2…` for exclusionCriteria).

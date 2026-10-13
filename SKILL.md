@@ -21,7 +21,7 @@ In a kernel: `sys.path.insert(0, "<skill>/scripts"); from slr import Client`.
 | `/slr help` | Print this table (command + one-line purpose). Nothing else. |
 | `/slr setup` | Guided setup — see **Setup**. |
 | `/slr status` | `CLI config show` + `CLI check` + `CLI drafts`. One short block: profile, project, server host, assigned / completed counts, pending drafts. If not configured → point to `/slr setup`. |
-| `/slr list` | `CLI list --all`. Table: # · task id · short title · year · fullTextStatus · has draft? |
+| `/slr list` | `CLI list --all`. Table: # · task id · stage · short title · year · fullTextStatus · has draft? |
 | `/slr review` | Draft votes for **all** assigned tasks without a draft — **Review loop**. Does not submit. |
 | `/slr review N` | Same, only the first N. |
 | `/slr review <id> [id…]` | Same, only these task ids. |
@@ -45,8 +45,10 @@ another project without switching.
 
 ## Token handling
 
-The agent token identifies the project on the review system. The project owner decides how
-sensitive it is, and **accepting it in chat is allowed**: when the user gives a token
+The agent token is scoped to one agent, one project, and one reviewer workspace. A Human
+Reviewer connects the catalog agent and retrieves or rotates this token in the review
+workspace. The project owner decides how sensitive it is, and **accepting it in chat is
+allowed**: when the user gives a token
 (via `/slr config token TOKEN` or just pasting it), save it with `config set-token --stdin`
 and continue. Do not refuse, do not ask them to rotate it, do not lecture.
 
@@ -79,16 +81,22 @@ Working files: `./paper-review/` (or `$REVIEW_WORKDIR`) — `fulltext/`, `drafts
 
 ## Review loop (`/slr review`, `/slr auto`)
 
-1. `CLI list --all`. Read `project.researchQuestions`, `inclusionCriteria`,
-   `exclusionCriteria` once; number them IC1…, EC1… in API order. Drop tasks that already
-   have a file in `drafts/` or `submitted/`. Apply N / ids. Say how many you'll do.
+1. `CLI list --all`. Drop tasks that already have a file in `drafts/` or `submitted/`.
+   Apply N / ids. Say how many you'll do. Use each task's `protocolSnapshot` as the
+   authoritative research questions and criteria for that task; number criteria IC1… and
+   EC1… in the snapshot's API order. The page-level project context is current context and
+   may have changed since a task was assigned.
 2. Per task:
-   - **Context:** task `instructions` (they override defaults) + `paper` metadata.
-   - **Full text** unless title + abstract clearly hit a hard exclusion:
+   - **Context:** task `instructions` (they override defaults), `protocolSnapshot`, `stage`,
+     and `paper` metadata.
+   - For `TITLE_ABSTRACT`, screen using title and abstract only. Never call the Markdown
+     endpoint or `CLI markdown` for this stage. A `409 FULLTEXT_STAGE_REQUIRED` is expected
+     and must not be retried.
+   - For `FULL_TEXT`, fetch Markdown only when the task includes `markdownPath`:
      `CLI markdown <taskId>` → `paper-review/fulltext/<taskId>.md`.
-     Exit 3 = still extracting (already waited per `Retry-After`) → retry-later list, come
-     back at the end. Exit 4 = no full text → abstract-only or `UNCERTAIN`.
-     Long papers: read Methods first.
+     Exit 3 = still extracting (waited per `Retry-After`) → retry-later list, come back at
+     the end. Exit 4 = unavailable → use available content or `UNCERTAIN`. `PARTIAL`
+     Markdown is usable; note partial coverage. Long papers: read Methods first.
    - **Judge** criterion by criterion with `references/review-rubric.md`. Every claim cites
      a section of the paper; no invented numbers or quotes.
    - **Draft:** write `paper-review/drafts/<id>.reason.md` and `<id>.data.json`, then
@@ -136,7 +144,7 @@ MCP connector for the rest of the session:
 | CLI | MCP tool |
 | --- | --- |
 | `list --all` | `list_tasks` |
-| `markdown <id>` | `get_markdown` (save the returned text to `paper-review/fulltext/<id>.md`; `pending` → retry later, `unavailable` → abstract-only / UNCERTAIN) |
+| `markdown <id>` | `get_markdown` only for `FULL_TEXT` tasks with `markdownPath` (save returned text to `paper-review/fulltext/<id>.md`; `pending` → retry later, `unavailable` → use available content / UNCERTAIN) |
 | `get <id>` | `get_task` |
 | `config test` | `connection_test` |
 | submit | `submit_result` (always) |
@@ -161,7 +169,7 @@ real path to this skill's `scripts` folder and the API URL as seen **from the ho
       "args": ["C:\\Users\\<user>\\.claude-science\\skills\\slr\\scripts\\slr_mcp.py"],
       "env": {
         "API_BASE_URL": "http://localhost:5000/api",
-        "AGENT_TOKEN": "<project agent token>"
+        "AGENT_TOKEN": "<reviewer workspace agent token>"
       }
     }
   }
@@ -180,7 +188,7 @@ the paths filled in (use the actual absolute path of this skill's `scripts` fold
 | `NETWORK` | no egress | Use the MCP connector (see **When the sandbox has no network**); `CLI diag` for details. No proxy visible → run the CLI from the same environment where earlier calls worked (proxy vars set); otherwise request a grant for the API host. Never resubmit blindly: check with `CLI get <id>` first. |
 | 401 | token bad/rotated | stop; `/slr config token` |
 | 404 | task not yours / gone | skip, note it |
-| 409 markdown | no full text | abstract-only or UNCERTAIN |
+| 409 markdown | wrong stage or Markdown unavailable | `FULLTEXT_STAGE_REQUIRED` → do not retry; screen title/abstract only. Other 409 → use available content or UNCERTAIN |
 | 409 submit | already done | count as done |
 | 400 | invalid body | fix, redraft |
 | 5xx | backend | script retries; else retry at end |
