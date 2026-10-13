@@ -1,6 +1,6 @@
 ---
 name: slr
-description: Systematic literature review screening agent, invoked as /slr followed by a command. Pulls papers assigned to this agent from the lab's Agent Task API, reads metadata and full text, judges each against the project's inclusion/exclusion criteria, drafts INCLUDE / EXCLUDE / UNCERTAIN votes with evidence, and submits them after the scientist approves. Also configures the API server URL and agent token. Use for /slr, or when asked to review, screen, vote on, or process assigned paper tasks.
+description: Systematic literature review screening agent, invoked as /slr followed by a command. Pulls reviewer-assigned tasks from the Agent Task API, reads metadata and eligible full text, and prepares stage-specific advisory recommendations with evidence. Recommendations complete only the AI task; human reviewers still cast official votes. Also configures the API URL and token.
 argument-hint: "[setup | status | list | review [N or ids] | drafts | edit ID | submit [ids] | auto [N] | mcp | config ... | diag | help]"
 ---
 
@@ -21,7 +21,7 @@ In a kernel: `sys.path.insert(0, "<skill>/scripts"); from slr import Client`.
 | `/slr help` | Print this table (command + one-line purpose). Nothing else. |
 | `/slr setup` | Guided setup — see **Setup**. |
 | `/slr status` | `CLI config show` + `CLI check` + `CLI drafts`. One short block: profile, project, server host, assigned / completed counts, pending drafts. If not configured → point to `/slr setup`. |
-| `/slr list` | `CLI list --all`. Table: # · task id · stage · short title · year · fullTextStatus · has draft? |
+| `/slr list` | `CLI list --all`. Table: # · task id · kind · stage · short title · year · fullTextStatus · has draft? |
 | `/slr review` | Draft votes for **all** assigned tasks without a draft — **Review loop**. Does not submit. |
 | `/slr review N` | Same, only the first N. |
 | `/slr review <id> [id…]` | Same, only these task ids. |
@@ -81,22 +81,28 @@ Working files: `./paper-review/` (or `$REVIEW_WORKDIR`) — `fulltext/`, `drafts
 
 ## Review loop (`/slr review`, `/slr auto`)
 
-1. `CLI list --all`. Drop tasks that already have a file in `drafts/` or `submitted/`.
+1. Call `CLI list --all --stage TITLE_ABSTRACT` and `CLI list --all --stage FULL_TEXT`
+   separately so each round gets its own cursor. Combine the pages, then drop tasks that
+   already have a file in `drafts/` or `submitted/`.
    Apply N / ids. Say how many you'll do. Use each task's `protocolSnapshot` as the
    authoritative research questions and criteria for that task; number criteria IC1… and
    EC1… in the snapshot's API order. The page-level project context is current context and
    may have changed since a task was assigned.
 2. Per task:
-   - **Context:** task `instructions` (they override defaults), `protocolSnapshot`, `stage`,
-     and `paper` metadata.
+   - **Context:** task `taskKind`, `instructions` (they override defaults), `protocolSnapshot`,
+     stage-specific `reviewPolicy`, and `paper` metadata. Process screening tasks only; skip
+     `taskKind: extraction` because this Claude Science adapter does not expose extraction tools.
    - For `TITLE_ABSTRACT`, screen using title and abstract only. Never call the Markdown
      endpoint or `CLI markdown` for this stage. A `409 FULLTEXT_STAGE_REQUIRED` is expected
-     and must not be retried.
+     and must not be retried. Allowed recommendations: `ADVANCE_TO_FULL_TEXT`, `EXCLUDE`,
+     or `UNCERTAIN`; advancing requests a full-text round and is not inclusion.
    - For `FULL_TEXT`, fetch Markdown only when the task includes `markdownPath`:
      `CLI markdown <taskId>` → `paper-review/fulltext/<taskId>.md`.
      Exit 3 = still extracting (waited per `Retry-After`) → retry-later list, come back at
-     the end. Exit 4 = unavailable → use available content or `UNCERTAIN`. `PARTIAL`
-     Markdown is usable; note partial coverage. Long papers: read Methods first.
+     the end. Exit 4 = unavailable. For `PARTIAL`, `PENDING`, or `PROCESSING` full text,
+     defer the task and wait for a `COMPLETED` source revision. For `FAILED` or `UNAVAILABLE`,
+     recommend `UNCERTAIN` with `data.fullTextAvailability`; do not imply that full text was
+     reviewed. Long papers: read Methods first.
    - **Judge** criterion by criterion with `references/review-rubric.md`. Every claim cites
      a section of the paper; no invented numbers or quotes.
    - **Draft:** write `paper-review/drafts/<id>.reason.md` and `<id>.data.json`, then
@@ -108,10 +114,12 @@ Working files: `./paper-review/` (or `$REVIEW_WORKDIR`) — `fulltext/`, `drafts
 
 ## Approval (`/slr drafts`, `/slr submit`)
 
-`CLI drafts` → table: id · title · decision · confidence · key reason, plus counts by
+`CLI drafts` → table: id · title · recommendation · confidence · key reason, plus counts by
 decision. Flag every `UNCERTAIN` and confidence < 0.7. For `/slr submit`, only send after an
-explicit yes in reply to that table — a submitted vote is final (the API rejects
-resubmission).
+explicit yes in reply to that table. These are advisory recommendations: submission completes
+only the AI task and does not create a human decision, change paper status, or count toward
+reviewer quorum. At TITLE_ABSTRACT, use `ADVANCE_TO_FULL_TEXT`, `EXCLUDE`, or `UNCERTAIN`;
+at FULL_TEXT, use `INCLUDE`, `EXCLUDE`, or `UNCERTAIN`.
 
 **Reads go direct (MCP fallback), writes go through MCP.** Reading (list, get, markdown) uses `CLI` as
 above. Sending votes uses the `slr` MCP connector when it is available — look for its
@@ -188,7 +196,8 @@ the paths filled in (use the actual absolute path of this skill's `scripts` fold
 | `NETWORK` | no egress | Use the MCP connector (see **When the sandbox has no network**); `CLI diag` for details. No proxy visible → run the CLI from the same environment where earlier calls worked (proxy vars set); otherwise request a grant for the API host. Never resubmit blindly: check with `CLI get <id>` first. |
 | 401 | token bad/rotated | stop; `/slr config token` |
 | 404 | task not yours / gone | skip, note it |
-| 409 markdown | wrong stage or Markdown unavailable | `FULLTEXT_STAGE_REQUIRED` → do not retry; screen title/abstract only. Other 409 → use available content or UNCERTAIN |
-| 409 submit | already done | count as done |
+| 409 task kind | `TASK_KIND_REQUIRED` or `EXTRACTION_TASK_REQUIRED` | Do not infer task kind; skip screening submission. Extraction tasks need the Open-Science extraction tools; legacy task repair is an admin action. |
+| 409 markdown | inactive stage, wrong stage, or unavailable source | `FULLTEXT_STAGE_REQUIRED` → do not retry. `TASK_STAGE_INACTIVE` → skip this round. `FULLTEXT_UNAVAILABLE` with `PARTIAL` → wait for a `COMPLETED` source revision; `FAILED`/`UNAVAILABLE` → recommend `UNCERTAIN`. |
+| 409 submit | completed task or inactive stage | `TASK_COMPLETED` → count as already completed. `TASK_STAGE_INACTIVE` → report/skip; do not count as completed. |
 | 400 | invalid body | fix, redraft |
 | 5xx | backend | script retries; else retry at end |

@@ -10,9 +10,9 @@ Stdlib only. Config comes from the connector's env (API_BASE_URL, AGENT_TOKEN)
 or from slr.py's stored profile (~/.config/slr).
 
 Tools:
-  list_tasks(status?)                                 tasks + project criteria (read fallback)
+  list_tasks(status?, stage?)                         tasks + project criteria (read fallback)
   get_markdown(task_id, max_wait?)                    full text (read fallback)
-  submit_result(task_id, decision, reasoning, data?)  POST a vote (final)
+  submit_result(task_id, decision, reasoning, data?)  POST an advisory recommendation
   get_task(task_id)                                   task status / result
   connection_test()                                   check URL + token
 """
@@ -22,7 +22,7 @@ import sys
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from slr import ApiError, Client, build_body  # noqa: E402
+from slr import ApiError, Client, EXIT_CONFLICT, build_body  # noqa: E402
 
 SERVER_INFO = {"name": "slr", "version": "1.0.0"}
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -30,17 +30,18 @@ SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 TOOLS = [
     {
         "name": "submit_result",
-        "title": "Submit SLR screening vote",
+        "title": "Submit SLR screening recommendation",
         "description": (
-            "Submit the final screening decision for one assigned paper task. "
-            "IRREVERSIBLE: the API rejects a second submission (409). Only call after the "
-            "scientist approved this vote. Returns status submitted / already_completed / error."
+            "Submit an advisory recommendation for one screening task. TITLE_ABSTRACT accepts "
+            "ADVANCE_TO_FULL_TEXT, EXCLUDE or UNCERTAIN; FULL_TEXT accepts INCLUDE, EXCLUDE or "
+            "UNCERTAIN. It completes only the AI task, never a human vote. Call only after the "
+            "scientist approved this recommendation."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task id from /slr list"},
-                "decision": {"type": "string", "description": "INCLUDE, EXCLUDE or UNCERTAIN",
+                "decision": {"type": "string", "description": "Stage-specific advisory recommendation",
                              "maxLength": 100},
                 "reasoning": {"type": "string", "description": "Reasoning text (max 16,000 chars)"},
                 "data": {"type": "object", "description": "Optional structured data object"},
@@ -60,7 +61,8 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"status": {"type": "string", "enum": ["ASSIGNED", "COMPLETED", "any"],
-                                      "default": "ASSIGNED"}},
+                                      "default": "ASSIGNED"},
+                           "stage": {"type": "string", "enum": ["TITLE_ABSTRACT", "FULL_TEXT"]}},
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": True},
@@ -119,17 +121,36 @@ def call_tool(name, args):
             body = build_body(args.get("decision"), args.get("reasoning"), args.get("data"))
             tid = str(args["task_id"])
             try:
+                refreshed = Client().get_task(tid)
+                task_info = refreshed.get("task") or refreshed
+                task_kind = task_info.get("taskKind")
+                if task_kind != "screening":
+                    code = "EXTRACTION_TASK_REQUIRED" if task_kind == "extraction" else "TASK_KIND_REQUIRED"
+                    raise ApiError(409, code,
+                                   "This task is not explicitly identified as a screening task.")
+                stage = task_info.get("stage") or "FULL_TEXT"
+                decision = body["decision"].upper()
+                body["decision"] = decision
+                if stage == "TITLE_ABSTRACT" and decision == "INCLUDE":
+                    decision = "ADVANCE_TO_FULL_TEXT"
+                    body["decision"] = decision
+                allowed = ({"ADVANCE_TO_FULL_TEXT", "EXCLUDE", "UNCERTAIN"}
+                           if stage == "TITLE_ABSTRACT" else {"INCLUDE", "EXCLUDE", "UNCERTAIN"})
+                if decision not in allowed:
+                    raise ApiError(None, "VALIDATION",
+                                   f"Decision {decision} is not allowed for {stage}; allowed: {', '.join(sorted(allowed))}.")
                 task = Client().submit(tid, body)
                 return tool_result({"taskId": tid, "status": "submitted",
                                     "decision": body["decision"],
                                     "taskStatus": (task or {}).get("status")})
             except ApiError as e:
-                if e.status == 409:
+                if e.exit_code == EXIT_CONFLICT:
                     return tool_result({"taskId": tid, "status": "already_completed",
                                         "message": e.message})
                 raise
         if name == "list_tasks":
-            project, items = Client().list_tasks(status=args.get("status") or "ASSIGNED")
+            project, items = Client().list_tasks(status=args.get("status") or "ASSIGNED",
+                                                 stage=args.get("stage"))
             return tool_result({"project": project, "count": len(items), "items": items})
         if name == "get_markdown":
             tid = str(args["task_id"])
@@ -139,7 +160,8 @@ def call_tool(name, args):
                 if e.status == 202:
                     return tool_result({"taskId": tid, "status": "pending", "message": e.message})
                 if e.status == 409:
-                    return tool_result({"taskId": tid, "status": "unavailable", "message": e.message})
+                    return tool_result({"taskId": tid, "status": "unavailable", "code": e.code,
+                                        "message": e.message})
                 raise
             return {"content": [{"type": "text", "text": text}],
                     "structuredContent": {"taskId": tid, "status": "ready", "chars": len(text)},

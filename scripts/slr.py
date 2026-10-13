@@ -25,7 +25,7 @@ reviewer, and project):
 
 CLI commands:
   check                                  verify config + network + token, count tasks
-  list      [--limit N] [--all] [--status ASSIGNED|COMPLETED|any]
+  list      [--limit N] [--all] [--status ASSIGNED|COMPLETED|any] [--stage TITLE_ABSTRACT|FULL_TEXT]
   get       TASK_ID
   markdown  TASK_ID [--out FILE] [--max-wait S]   (default out: <workdir>/fulltext/<id>.md)
   draft     TASK_ID --decision D (--reasoning T | --reasoning-file F) [--data J | --data-file F]
@@ -228,16 +228,20 @@ class Client:
         return payload["data"]
 
     # --- endpoints
-    def list_page(self, limit=50, cursor=None):
+    def list_page(self, limit=50, cursor=None, stage=None):
         q = {"limit": max(1, min(100, limit))}
         if cursor:
             q["cursor"] = cursor
+        if stage:
+            if stage not in ("TITLE_ABSTRACT", "FULL_TEXT"):
+                raise ApiError(None, "VALIDATION", "stage must be TITLE_ABSTRACT or FULL_TEXT.")
+            q["stage"] = stage
         return self._get_json("/agent/v1/tasks?" + urllib.parse.urlencode(q))
 
-    def list_tasks(self, status="ASSIGNED", limit=100):
+    def list_tasks(self, status="ASSIGNED", limit=100, stage=None):
         items, project, cursor = [], None, None
         while True:
-            page = self.list_page(limit, cursor)
+            page = self.list_page(limit, cursor, stage)
             project = project or page.get("project")
             items.extend(page.get("items", []))
             cursor = page.get("nextCursor")
@@ -287,7 +291,19 @@ class Client:
         status, _, raw = self._request("POST", path, body=body)
         if status == 200:
             return json.loads(raw.decode("utf-8")).get("data")
-        self._raise(status, raw, EXIT_CONFLICT if status == 409 else EXIT_ERROR)
+        try:
+            code = (json.loads(raw.decode("utf-8")).get("error") or {}).get("code")
+        except Exception:
+            code = None
+        completed = code in {"TASK_COMPLETED", "TASK_ALREADY_COMPLETED", "ALREADY_COMPLETED"}
+        if status == 409 and not completed:
+            try:
+                current = self.get_task(task_id)
+                current_task = current.get("task") or current
+                completed = current_task.get("status") == "COMPLETED"
+            except ApiError:
+                completed = False
+        self._raise(status, raw, EXIT_CONFLICT if status == 409 and completed else EXIT_ERROR)
 
 
 # ------------------------------------------------------------------ audit log
@@ -369,10 +385,10 @@ def cmd_check(args):
 def cmd_list(args):
     c = Client()
     if args.all:
-        project, items = c.list_tasks(status=args.status, limit=args.limit)
+        project, items = c.list_tasks(status=args.status, limit=args.limit, stage=args.stage)
         nxt = None
     else:
-        page = c.list_page(args.limit)
+        page = c.list_page(args.limit, stage=args.stage)
         project, items, nxt = page.get("project"), page.get("items", []), page.get("nextCursor")
         if args.status != "any":
             items = [t for t in items if t.get("status") == args.status]
@@ -614,6 +630,7 @@ def main():
     s.add_argument("--limit", type=int, default=50)
     s.add_argument("--all", action="store_true")
     s.add_argument("--status", default="ASSIGNED")
+    s.add_argument("--stage", choices=["TITLE_ABSTRACT", "FULL_TEXT"])
     s.set_defaults(func=cmd_list)
 
     s = sub.add_parser("get"); s.add_argument("task_id"); s.set_defaults(func=cmd_get)
