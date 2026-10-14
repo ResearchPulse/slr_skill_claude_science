@@ -9,12 +9,27 @@ Apply in this order:
 2. **Inclusion check.** For each inclusion criterion mark it `met`, `not_met` or
    `unclear`, with evidence.
    - Any `not_met` (clearly) → `EXCLUDE`.
-   - All `met` → `INCLUDE`.
+   - If all are `met`, use the positive recommendation allowed for the task's stage.
    - Otherwise (some `unclear`, none `not_met`) → `UNCERTAIN`.
 3. **Task instructions win.** If the task `instructions` add or tighten rules (e.g.
    "exclude conference abstracts", "title/abstract screening only"), follow them.
 4. **When torn between INCLUDE and EXCLUDE, choose UNCERTAIN.** A wrongly excluded paper
    is lost forever; an UNCERTAIN gets a human look.
+
+## Apply the rubric by screening round
+
+- **Round 1 — `TITLE_ABSTRACT`:** use only title, abstract, and known `paper.keywords`.
+  `keywords: null` means unavailable; do not infer keywords or treat their absence as an
+  exclusion. Missing or ambiguous summary evidence is `unclear`, not `not_met`. Recommend
+  `EXCLUDE` only for a clearly established exclusion trigger or failed inclusion criterion;
+  recommend `ADVANCE_TO_FULL_TEXT` only when every inclusion criterion is supported and no
+  exclusion applies. If evidence is insufficient and there is no clear exclusion, use
+  `UNCERTAIN`. `INCLUDE` is invalid in this round; never convert it to
+  `ADVANCE_TO_FULL_TEXT`.
+- **Round 2 — `FULL_TEXT`:** assess the completed full-text Markdown against all IC/EC.
+  Recommend `INCLUDE` only when all inclusion criteria are supported and no exclusion applies;
+  use `EXCLUDE` for clear contrary evidence and `UNCERTAIN` for insufficient or ambiguous
+  evidence. Do not decide from `PARTIAL` Markdown; wait for a `COMPLETED` source revision.
 
 Common hard-exclusion signals: wrong population or age group, non-human/animal study when
 humans are required, wrong study design (review, editorial, protocol, commentary when
@@ -73,15 +88,18 @@ unsupported statement will be flagged.
 }
 ```
 
-`basis` is `full_text`, `partial_full_text` (fullTextStatus `PARTIAL`) or
-`title_abstract`. Use `null` for fields the paper does not report. Keep evidence snippets
-short (one line each) so the body stays well under 30 KB.
+`basis` is `full_text` or `title_abstract`. Use `null` for fields the paper does not report.
+Keep evidence snippets short (one line each) so the body stays well under 30 KB. Keep
+criterion entries in the established MCP data shape: `id`, `text`, `status`, and `evidence`.
+The API contract's POST examples currently use `criterion` and `assessment`; they do not
+explicitly define a replacement result schema, so do not switch to those keys unless the
+backend contract confirms that schema.
 
 Set `basis` according to the task stage and the content actually reviewed. A
 `TITLE_ABSTRACT` task always uses `title_abstract`; do not fetch Markdown for it. For a
-`FULL_TEXT` task, use `partial_full_text` when the API reports `PARTIAL`, and `full_text`
-when extraction completed normally. Assess against that task's `protocolSnapshot`, which
-captures the criteria at assignment time.
+`FULL_TEXT` task, review only when Markdown is available from a `COMPLETED` source revision
+and use `full_text`. Assess against that task's `protocolSnapshot`, which captures the
+criteria at assignment time.
 
 Criterion ids: number the task's `protocolSnapshot` criteria in their API order
 (`IC1, IC2…` for inclusionCriteria, `EC1, EC2…` for exclusionCriteria).

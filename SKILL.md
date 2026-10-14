@@ -92,15 +92,20 @@ Working files: `./paper-review/` (or `$REVIEW_WORKDIR`) — `fulltext/`, `drafts
    - **Context:** task `taskKind`, `instructions` (they override defaults), `protocolSnapshot`,
      stage-specific `reviewPolicy`, and `paper` metadata. Process screening tasks only; skip
      `taskKind: extraction` because this Claude Science adapter does not expose extraction tools.
-   - For `TITLE_ABSTRACT`, screen using title and abstract only. Never call the Markdown
-     endpoint or `CLI markdown` for this stage. A `409 FULLTEXT_STAGE_REQUIRED` is expected
-     and must not be retried. Allowed recommendations: `ADVANCE_TO_FULL_TEXT`, `EXCLUDE`,
-     or `UNCERTAIN`; advancing requests a full-text round and is not inclusion.
+   - For `TITLE_ABSTRACT`, assess only the title, abstract, and known `paper.keywords`.
+     Treat `keywords: null` as unavailable; never infer keywords or exclude only because they
+     are missing. Missing summary information is `unclear`, not `not_met`. Recommend
+     `ADVANCE_TO_FULL_TEXT` only when the available metadata supports every inclusion
+     criterion and no exclusion criterion is established; use `UNCERTAIN` when evidence is
+     insufficient and no clear exclusion applies. `INCLUDE` is invalid at this stage; do not
+     relabel it as `ADVANCE_TO_FULL_TEXT`. Never call the Markdown endpoint or `CLI markdown`
+     for this stage. `ADVANCE_TO_FULL_TEXT` requests Round 2; it is not inclusion.
    - For `FULL_TEXT`, fetch Markdown only when the task includes `markdownPath`:
      `CLI markdown <taskId>` → `paper-review/fulltext/<taskId>.md`.
      Exit 3 = still extracting (waited per `Retry-After`) → retry-later list, come back at
-     the end. Exit 4 = unavailable. For `PARTIAL`, `PENDING`, or `PROCESSING` full text,
-     defer the task and wait for a `COMPLETED` source revision. For `FAILED` or `UNAVAILABLE`,
+     the end. Exit 4 = unavailable. Review and decide only from Markdown for a `COMPLETED`
+     source revision. For `PARTIAL`, `PENDING`, or `PROCESSING` full text, defer the task and
+     wait for a `COMPLETED` source revision. For `FAILED` or `UNAVAILABLE`,
      recommend `UNCERTAIN` with `data.fullTextAvailability`; do not imply that full text was
      reviewed. Long papers: read Methods first.
    - **Judge** criterion by criterion with `references/review-rubric.md`. Every claim cites

@@ -41,7 +41,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task id from /slr list"},
-                "decision": {"type": "string", "description": "Stage-specific advisory recommendation",
+                "decision": {"type": "string", "enum": ["ADVANCE_TO_FULL_TEXT", "INCLUDE",
+                                                               "EXCLUDE", "UNCERTAIN"],
+                             "description": "Stage-specific advisory recommendation. TITLE_ABSTRACT rejects INCLUDE; FULL_TEXT rejects ADVANCE_TO_FULL_TEXT.",
                              "maxLength": 100},
                 "reasoning": {"type": "string", "description": "Reasoning text (max 16,000 chars)"},
                 "data": {"type": "object", "description": "Optional structured data object"},
@@ -55,7 +57,9 @@ TOOLS = [
         "name": "list_tasks",
         "title": "List SLR tasks",
         "description": ("List tasks assigned to this reviewer workspace's agent (all cursor pages), "
-                        "including each task's stage and protocolSnapshot. The page also includes "
+                        "including stage, protocolSnapshot, and paper title/abstract/keywords. "
+                        "paper.keywords is an array or null when unavailable; never infer missing "
+                        "keywords. The page also includes "
                         "current project context. Fallback for /slr list when "
                         "direct API reads from the sandbox fail."),
         "inputSchema": {
@@ -87,7 +91,8 @@ TOOLS = [
         "name": "get_task",
         "title": "Get SLR task status",
         "description": ("Return the reviewer-scoped task, stage, protocolSnapshot, markdownPath, "
-                        "paper metadata, and result. Use it to refresh a task or verify submission."),
+                        "paper metadata (including keywords as an array or null when unavailable), "
+                        "and result. Use it to refresh a task or verify submission."),
         "inputSchema": {
             "type": "object",
             "properties": {"task_id": {"type": "string"}},
@@ -128,14 +133,15 @@ def call_tool(name, args):
                     code = "EXTRACTION_TASK_REQUIRED" if task_kind == "extraction" else "TASK_KIND_REQUIRED"
                     raise ApiError(409, code,
                                    "This task is not explicitly identified as a screening task.")
-                stage = task_info.get("stage") or "FULL_TEXT"
+                stage = task_info.get("stage")
+                if stage not in {"TITLE_ABSTRACT", "FULL_TEXT"}:
+                    raise ApiError(None, "VALIDATION",
+                                   f"Task has invalid or missing stage {stage!r}; expected TITLE_ABSTRACT or FULL_TEXT.")
                 decision = body["decision"].upper()
                 body["decision"] = decision
-                if stage == "TITLE_ABSTRACT" and decision == "INCLUDE":
-                    decision = "ADVANCE_TO_FULL_TEXT"
-                    body["decision"] = decision
                 allowed = ({"ADVANCE_TO_FULL_TEXT", "EXCLUDE", "UNCERTAIN"}
-                           if stage == "TITLE_ABSTRACT" else {"INCLUDE", "EXCLUDE", "UNCERTAIN"})
+                           if stage == "TITLE_ABSTRACT" else
+                           {"INCLUDE", "EXCLUDE", "UNCERTAIN"})
                 if decision not in allowed:
                     raise ApiError(None, "VALIDATION",
                                    f"Decision {decision} is not allowed for {stage}; allowed: {', '.join(sorted(allowed))}.")

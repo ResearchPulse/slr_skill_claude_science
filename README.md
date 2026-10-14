@@ -5,7 +5,8 @@
 **Trợ lý sàng lọc tài liệu cho Claude Code · Claude Science · Claude Desktop**
 
 Lấy task từ Agent Task API → đọc metadata & full text → chấm theo tiêu chí inclusion/exclusion →
-soạn phiếu `INCLUDE` / `EXCLUDE` / `UNCERTAIN` có dẫn chứng → chỉ gửi khi nhà khoa học duyệt.
+soạn recommendation theo stage (`ADVANCE_TO_FULL_TEXT` ở Round 1; `INCLUDE` ở Round 2) cùng
+`EXCLUDE` / `UNCERTAIN` và dẫn chứng → chỉ gửi khi nhà khoa học duyệt.
 
 [![Node](https://img.shields.io/badge/node-%E2%89%A516.7-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.8-3776AB?logo=python&logoColor=white)](https://www.python.org)
@@ -266,7 +267,7 @@ slr_skill_claude_science/
 
 Skill và MCP tuân theo `AI_AGENT_TASK_API_CONTRACT.md`: agent token được giới hạn theo agent, project và reviewer workspace; danh sách task được lấy qua cursor; mỗi task dùng `protocolSnapshot` để chấm theo bộ tiêu chí tại thời điểm giao.
 
-Chỉ lấy Markdown khi task có `stage: FULL_TEXT` và có `markdownPath`. Task `TITLE_ABSTRACT` chỉ được đánh giá từ title/abstract; MCP và CLI tự kiểm tra stage trước khi gọi endpoint. Trạng thái trích xuất `202` tuân theo `Retry-After`; Markdown `PARTIAL` vẫn có thể dùng và cần ghi rõ mức bao phủ.
+Chỉ lấy Markdown khi task có `stage: FULL_TEXT` và có `markdownPath`, đồng thời chỉ review khi source revision đã `COMPLETED`. Task `TITLE_ABSTRACT` dùng title, abstract và keywords nếu có; `keywords: null` là chưa có metadata, không phải lý do loại bài. MCP kiểm tra stage và decision theo từng vòng; `INCLUDE` bị từ chối ở Round 1 và không được đổi thành `ADVANCE_TO_FULL_TEXT`. Trạng thái trích xuất `202` tuân theo `Retry-After`; Markdown `PARTIAL` chưa dùng để review, cần đợi source revision `COMPLETED`.
 
 Kết quả agent là recommendation riêng, không tạo screening decision của reviewer. Reviewer lấy/cấp lại token trong review workspace; nếu token bị rotate, cập nhật lại token trong cấu hình MCP và profile `/slr`.
 
