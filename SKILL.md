@@ -63,7 +63,7 @@ API another way.
 | `/slr config use <P>` | `config_use` (it also tests the connection). |
 | `/slr config test` | `connection_test` |
 | `/slr mcp` | `connection_test` and report. If the tools are missing, explain **MCP connector**. |
-| `/slr consensus [task_id]` | Leader-only: discover eligible consensus tasks automatically when the ID is omitted, then read the R1/R2 comparison, show complete field/evidence/check tables, and save/submit only after explicit approval and only when no conflict remains. |
+| `/slr consensus [task_id]` | Leader-only: discover eligible consensus tasks automatically when the ID is omitted, then read the R1/R2 comparison and show the compact comparison/evidence tables. Save/submit only after explicit approval and only when no conflict remains. |
 
 Several projects: one profile each (`--profile <name>` on `config url` / `config token`,
 switch with `/slr config use <name>`). Switches and new tokens work immediately — no
@@ -73,7 +73,8 @@ reviewing or submitting.
 ## Mandatory full-table output (non-negotiable)
 
 Every user-facing response for every `/slr` command MUST include Markdown table(s) rendered
-inline in the response, with the complete available information. A prose-only summary is
+inline in the response, with all available information for the columns prescribed by that
+workflow. A prose-only summary is
 invalid, even when the tool response is short, the task has no draft, or all checks pass.
 Never hide details behind "view", "show", a collapsed tool result, or a follow-up request
 unless the user explicitly asks for a brief summary. Always render the tables automatically;
@@ -93,37 +94,48 @@ Do not render these standalone technical tables:
   `Required`, and `Expected shape`.
 - An aggregate checks table or individual-check-detail table containing multiple paper/task ids.
 
-Keep only relevant source identity, template, or validation details inside the current paper's
-own overview, extracted-values, evidence, or validation table. The allowed output is one paper's
-overview table, extracted-values table, evidence table, and validation table at a time.
+Keep source identity, template, and validation details internal to the MCP payload and checks.
+The user-facing output is one paper's metadata table, extraction-fields table, and evidence table
+at a time; do not render a standalone validation/checks table.
 
-For `/slr consensus`, render one primary comparison table per paper containing every custom
-field, R1 value, R2 value, agent decision, recommended value, reason, and the available evidence
-summary. Do not render the standalone second check table (`Field ID | Result | Message`); include
-the relevant check outcome inline in the comparison row instead. This presentation rule does not
-allow omitting the underlying evidence or the agent's field-level reason.
+For `/slr consensus`, render one primary comparison table per paper with exactly these columns:
+`Field`, `R1 value`, `R2 value`, `Agent decision`, `Recommended value`, and `Reason and checks`.
+Then render a separate evidence table with exactly these columns: `Reviewer`, `Field`, `Exact quote`,
+`Line (start-end)`, and `Location`. Do not render a standalone validation/checks table.
 
-For every `/slr review`, render these tables before the concluding prose:
+Display simplification: render only the columns explicitly specified for the current workflow.
+Use custom field names, not internal field IDs. Never render source asset IDs, source revisions,
+source hashes, quote hashes, raw template schema columns, or standalone validation/check tables.
+Retain all omitted identifiers in the MCP payload and validation logic.
 
-1. Task/source metadata: profile, project, server host, task id, paper, task kind, stage,
-   task status, full-text status, template id/version, draft version, and submission state.
-2. Extraction fields: one row for every custom template field, including section, field id,
-   field name, required flag, expected type/shape, actual value, and evidence count. Include
-   a row with `—` when a field has no value.
-3. Evidence: one row for every evidence item, including field id, exact quote, source asset,
-   source revision/hash, quote hash, start/end offsets, section, paragraph, and PDF page.
-4. Checks: one row for every value/evidence validation check or issue, including code, field,
-   result (`PASS`, `WARN`, or `BLOCK`), and exact message.
+For every `/slr review`, render only these tables before the concluding prose:
+
+1. Task/source metadata with exactly: `Profile / project`, `Task ID`, `Paper`, `Task status`,
+   and `Full-text status`.
+2. Extraction fields with exactly: `Name`, `Actual value`, and `Evidence`. Use the custom
+   template field name in `Name`; `Evidence` is the available evidence count/indicator.
+3. Evidence with exactly: `Exact quote`, `Line (start-end)`, and
+   `Section / paragraph / PDF page`.
+
+Display evidence locations as 1-based inclusive line ranges from the normalized Markdown source
+returned by `get_extraction_fulltext`: use `Line 42` for a single-line quote and `Line 42-45`
+for a multi-line quote. If line mapping is unavailable, use an empty-value marker. Keep the
+zero-based character offsets (`startOffset` inclusive, `endOffset` exclusive) in the MCP payload
+for validation, but do not render them or expose quote hashes/source identifiers.
+
+Do not render a `Validation checks` table or individual validation/check rows in review output.
+Run those checks internally. If a check is `BLOCK`, stop the write operation and explain the
+blocking reason briefly in prose.
 
 For extraction tasks, the compact paper-level table `Paper | Extracted finding | Check` is
-forbidden as the only output. Do not claim that templates or evidence were reviewed unless
-the field, evidence, and check rows are visible in the response. Repeat the complete table
-bundle for each task; never use one combined table with a `task id` column and never collapse two
-or more tasks into one finding sentence per paper.
+forbidden as the only output. Do not claim that templates or evidence were reviewed unless the
+metadata, field, and evidence rows are visible. Repeat the complete table bundle for each task;
+never use one combined table with a `task id` column and never collapse two or more tasks into one
+finding sentence per paper.
 
 For screening review, replace the extraction-fields table with one criterion row per
-inclusion/exclusion criterion and still show the task/source, evidence, checks, and submit
-state tables. If a table has no rows, render its headers and a `—` row instead of omitting it.
+inclusion/exclusion criterion and still show the task/source and evidence tables. Do not render
+a validation/checks table. If a table has no rows, render its headers and an empty-value row.
 
 - `status`, `list`, and `drafts`: include one complete row per task or draft with profile,
   project, server host, task/draft id, paper title, task kind, stage, status, full-text
@@ -131,33 +143,20 @@ state tables. If a table has no rows, render its headers and a `—` row instead
 - Screening review: include task/paper/stage, decision, confidence, reasoning, every
   criterion id and text, criterion result, exact supporting quote, section/page/offset, and
   draft/submission state. Use one row per criterion when needed.
-- Extraction review: always include a field table with section, field id/name, required,
-  value, and evidence count, plus an evidence table with field id, exact quote,
-  sourceAssetId, sourceRevision, sourceHash, start/end offsets, paragraph/page, and
-  quoteHash. Also include check status and every validation issue.
+- Extraction review: use only the compact metadata, extraction-fields, and evidence tables
+  defined above. Do not add field IDs, source identifiers, hashes, or validation columns.
 - `/slr review` MUST use the extraction template returned by `get_extraction_context` for
   the current assignment. Never replace custom fields with a preset or a hard-coded field
-  list. For every extraction task, show these tables even when the draft is already present:
-  (1) task/source/template metadata, (2) one row per template field and its value, (3) one
-  row per evidence item, and (4) one row per evidence/value check or validation issue.
-- Value checks must show: check code, field id, field name, required flag, expected type or
-  shape, actual value, result (`PASS`, `WARN`, or `BLOCK`), and the exact validation message.
-  Include template id/version, draft version, expected version, source revision, and source
-  hash checks when the API returns them. Do not claim a check passed when the API did not
-  return that result; use `—`.
-- Evidence checks must show: check code, field id, exact quote, source asset id, source
-  revision, source hash, quote hash, start/end offsets, section, paragraph, PDF page,
-  result, and exact validation message. Explicitly show checks for field membership,
-  quote-to-source matching, offset bounds, quote hash, source identity/revision/hash, and
-  required-field evidence coverage when available.
+  list. For every extraction task, show the three tables above even when the draft is already
+  present. Keep all value/evidence validation internal and do not render it.
 - For screening tasks in `/slr review`, show one criterion row per inclusion/exclusion
   criterion with criterion id/text, result, decision, confidence, reasoning, exact quote,
   source location, and draft state. A paper-level summary table alone is not sufficient.
 - Submit and finalize: show the exact pre-submit payload summary and a result table with
   task id, submission/proposal id, status, draft version, evidence count, canonical-record
   state, and human-finalize requirement.
-- Use `—` for unavailable values and split wide output into multiple tables when necessary,
-  but never omit available rows or columns. Redact tokens and other secrets.
+- Use an empty-value marker for unavailable values and split wide output into multiple tables when
+  necessary, but never omit available rows or columns. Redact tokens and other secrets.
 
 ## Token handling
 
@@ -364,10 +363,12 @@ another reviewer's submission.
    decision. Inspect every custom field's R1 value, R2 value, and both reviewers' evidence; do not
    resolve a disagreement by raw string comparison, whitespace/case normalization, or a title-only
    heuristic. The agent must perform the semantic/evidence comparison and write its own field-level
-   status, recommended value, and reason into the `analysis` payload. Show one complete table bundle for
-   this paper containing field id/name/section/required, R1 value, R2 value, recommended value,
-   comparison status, reason, value/evidence checks, and the complete evidence rows (quote,
-   offsets, section/paragraph/PDF page, source revision). Do not collapse this behind a follow-up.
+   status, recommended value, and reason into the `analysis` payload. Show one table bundle for this
+   paper with a consensus-task metadata table containing exactly `Profile / project`, `Paper`, and
+   `Full text`; a field-comparison table containing exactly `Field`, `R1 value`, `R2 value`,
+   `Agent decision`, `Recommended value`, and `Reason and checks`; and an evidence table containing
+   exactly `Reviewer`, `Field`, `Exact quote`, `Line (start-end)`, and `Location`.
+   `Location` is section / paragraph / PDF page. Do not render a standalone validation/checks table.
 4. For an exact same value use `AGREE`. If values differ in wording or formatting but the source
    evidence proves the same meaning, use `SEMANTIC_AGREE`, select a source-supported recommended
    value, and explain why. A line break, harmless formatting variation, equivalent terminology,
@@ -422,7 +423,8 @@ template snapshot returned by the context. Save one canonical draft with this sh
 Rules: `templateVersion` is numeric; `expectedVersion` is the isolated draft version from
 context, or `0` when no draft exists. Copy source metadata exactly from full text. Offsets are
 zero-based positions in normalized Markdown, `endOffset` is exclusive, and `quoteHash` is the
-SHA-256 hex digest of the exact quote. `values` is an object keyed by the template's exact field
+SHA-256 hex digest of the exact quote. Line ranges are presentation-only; never replace
+`startOffset`/`endOffset` in the MCP payload with line numbers. `values` is an object keyed by the template's exact field
 IDs and `evidence` is an array. Use `{ "isNotReported": true }` for a required value that the
 paper does not report. Send `evidence: []` when there is no defensible evidence, then let the
 deterministic check return its result. Do not use the legacy `fields` list, `templateVersion: "v1"`,
