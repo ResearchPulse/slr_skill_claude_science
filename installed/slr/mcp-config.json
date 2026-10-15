@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "slr": {
+      "command": "E:\\jsm\\jsm-be\\.uv-python\\cpython-3.12.14-windows-x86_64-none\\python.exe",
+      "args": [
+        "E:\\Scientific_Journal_Publication_Trend_Tracking_System\\slr_skill_claude_science\\installed\\slr\\scripts\\slr_mcp.py"
+      ]
+    }
+  }
+}

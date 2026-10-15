@@ -41,7 +41,7 @@ npx github:ResearchPulse/slr_skill_claude_science
 
 - 🔎 **Sàng lọc tự động** từng bài theo IC/EC của dự án, mỗi nhận định đều trích dẫn section của bài.
 - ✍️ **Draft trước, gửi sau** — phiếu chỉ được gửi khi bạn đồng ý; có `audit.jsonl` làm nhật ký kiểm toán.
-- 🔌 **MCP connector** (`submit_result`, `list_tasks`, `get_markdown`, `get_task`, `connection_test`) — vẫn hoạt động khi sandbox không có mạng.
+- 🔌 **MCP connector** cho screening, Phase 2 extraction và leader consensus (`list_consensus_tasks`, `analyze_extraction_consensus`, `save_extraction_consensus_draft`, `submit_extraction_consensus` cùng các tool đọc/ghi liên quan) — vẫn hoạt động khi sandbox không có mạng.
 - 🗂️ **Nhiều dự án** — mỗi dự án một profile, chuyển qua lại bằng `/slr config use`.
 - 🪶 **Không phụ thuộc** — Python thư viện chuẩn, installer Node không cần `npm install`.
 
@@ -203,12 +203,13 @@ Mở Claude (khởi động lại Claude Desktop nếu đang chạy) rồi gõ `
 | `/slr setup` | Thiết lập có hướng dẫn |
 | `/slr status` | Profile, dự án, số task được giao / đã xong, số draft |
 | `/slr list` | Danh sách task |
-| `/slr review [N \| id…]` | Soạn phiếu (chưa gửi) |
+| `/slr review [N \| id…]` | Soạn screening hoặc extraction draft theo template, luôn hiện bảng field/evidence/check |
 | `/slr drafts` | Bảng draft để duyệt |
 | `/slr edit <id> <yêu cầu>` | Sửa một draft — vd. *"đổi sang UNCERTAIN, IC3 chưa rõ"* |
 | `/slr submit [id…]` | Gửi phiếu đã duyệt qua MCP `submit_result` |
 | `/slr auto [N]` | Soạn và gửi ngay (xác nhận một lần) |
 | `/slr config …` | `show` · `url` · `token` · `use` · `test` · `remove` |
+| `/slr consensus [task_id]` | Leader: tự tìm task sau khi R1/R2 submit, so sánh field/evidence, lưu draft và submit consensus chính thức khi không conflict |
 | `/slr mcp` | Hiện config MCP / kiểm tra connector |
 | `/slr diag` | Chẩn đoán proxy / CA / DNS |
 | `/slr help` | Bảng lệnh |

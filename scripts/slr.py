@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Client for the AI Agent Task API (paper screening) — Claude Science edition.
 
-Stdlib only; usable as a CLI or imported in a Python kernel:
+Stdlib only; usable as a CLI or imported (the `slr` MCP connector imports it):
 
     import sys; sys.path.insert(0, "<skill>/scripts")
     from slr import Client
@@ -25,7 +25,7 @@ reviewer, and project):
 
 CLI commands:
   check                                  verify config + network + token, count tasks
-  list      [--limit N] [--all] [--status ASSIGNED|COMPLETED|any] [--stage TITLE_ABSTRACT|FULL_TEXT]
+  list      [--limit N] [--all] [--status ASSIGNED|COMPLETED|any]
   get       TASK_ID
   markdown  TASK_ID [--out FILE] [--max-wait S]   (default out: <workdir>/fulltext/<id>.md)
   draft     TASK_ID --decision D (--reasoning T | --reasoning-file F) [--data J | --data-file F]
@@ -51,8 +51,9 @@ MAX_BODY_BYTES = 30 * 1024
 MAX_REASONING = 16000
 MAX_DECISION = 100
 RETRYABLE = {500, 502, 503, 504}
-USER_AGENT = "slr-agent/1.0 (systematic-review screening CLI)"
+USER_AGENT = "slr-agent-claude-science/1.0 (systematic-review screening CLI)"
 CONF_DIR = Path.home() / ".config" / "slr"
+DEFAULT_API_URL = "https://slr-agent.hyperdatalab.org/api"
 
 EXIT_OK, EXIT_ERROR, EXIT_PENDING, EXIT_UNAVAILABLE, EXIT_CONFLICT = 0, 1, 3, 4, 5
 
@@ -131,14 +132,62 @@ def _mask(tok):
     return f"set (…{tok[-4:]}, {len(tok)} chars)" if len(tok) >= 12 else "set"
 
 
+# Where drafts live when $REVIEW_WORKDIR is unset. The CLI uses ./paper-review; the MCP
+# connector (whose cwd is not the chat's) swaps in ~/slr-paper-review/<profile>.
+WORKDIR_DEFAULT = lambda: Path("paper-review")  # noqa: E731
+
+
 def workdir():
-    d = Path(os.environ.get("REVIEW_WORKDIR", "paper-review")).resolve()
+    env = os.environ.get("REVIEW_WORKDIR")
+    d = (Path(env).expanduser() if env else WORKDIR_DEFAULT()).resolve()
     for sub in ("fulltext", "drafts", "submitted"):
         (d / sub).mkdir(parents=True, exist_ok=True)
     return d
 
 
 # ------------------------------------------------------------------ validation
+
+CRITERION_STATUSES = ("met", "not_met", "unclear")
+BASES = ("title_abstract", "full_text")
+
+
+def validate_data(data):
+    """The web app's "Criteria assessment" panel renders data.criteria; refuse votes without it.
+
+    Same shape as the Claude Science skill:
+      {"id": "IC1", "text": "<criterion text>", "status": met|not_met|unclear,
+       "evidence": "<short quote / location>"}
+    `name` is accepted for `text`, `evidence` may be a list, `reasoning` is optional.
+    """
+    if not isinstance(data, dict):
+        raise ApiError(None, "VALIDATION", "data must be a JSON object with basis, confidence and criteria "
+                       "(see 'Vote format' in the /slr skill).")
+    if data.get("basis") not in BASES:
+        raise ApiError(None, "VALIDATION", f"data.basis must be one of {', '.join(BASES)}.")
+    conf = data.get("confidence")
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
+        raise ApiError(None, "VALIDATION", "data.confidence must be a number from 0 to 1.")
+    crit = data.get("criteria")
+    if not isinstance(crit, list) or not crit:
+        raise ApiError(None, "VALIDATION", "data.criteria must list every IC/EC of the task's protocolSnapshot "
+                       "— the web app shows it as 'Criteria assessment'.")
+    for i, c in enumerate(crit):
+        where = f"data.criteria[{i}]"
+        if not isinstance(c, dict):
+            raise ApiError(None, "VALIDATION", f"{where} must be an object.")
+        filled = lambda v: isinstance(v, str) and v.strip()  # noqa: E731
+        if not filled(c.get("id")):
+            raise ApiError(None, "VALIDATION", f"{where}.id is required (IC1, EC1…).")
+        if not (filled(c.get("text")) or filled(c.get("name"))):
+            raise ApiError(None, "VALIDATION", f"{where}.text is required (the criterion text).")
+        if c.get("status") not in CRITERION_STATUSES:
+            raise ApiError(None, "VALIDATION", f"{where}.status must be one of {', '.join(CRITERION_STATUSES)}.")
+        ev = c.get("evidence")
+        if not (filled(ev) or (isinstance(ev, list) and all(filled(e) for e in ev))):
+            raise ApiError(None, "VALIDATION", f"{where}.evidence must be a short quote/location "
+                           "(text, or a list of them).")
+    return data
+
 
 def build_body(decision, reasoning, data=None):
     decision = (decision or "").strip()
@@ -149,14 +198,49 @@ def build_body(decision, reasoning, data=None):
         raise ApiError(None, "VALIDATION", "reasoning is required.")
     if len(reasoning) > MAX_REASONING:
         raise ApiError(None, "VALIDATION", f"reasoning is {len(reasoning)} chars; max {MAX_REASONING}.")
-    body = {"decision": decision, "reasoning": reasoning}
-    if data is not None:
-        if not isinstance(data, dict):
-            raise ApiError(None, "VALIDATION", "data must be a JSON object.")
-        body["data"] = data
-    size = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    body = {"decision": decision, "reasoning": reasoning, "data": validate_data(data)}
+    size =len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
     if size > MAX_BODY_BYTES:
         raise ApiError(None, "VALIDATION", f"body is {size} bytes; max {MAX_BODY_BYTES}.")
+    return body
+
+
+def validate_task_result(task_response, body):
+    """Reject stage-incompatible screening results before sending the POST."""
+    task = task_response.get("task") or task_response
+    stage = task.get("stage") or (task.get("reviewPolicy") or {}).get("stage") or "FULL_TEXT"
+    if stage not in ("TITLE_ABSTRACT", "FULL_TEXT"):
+        raise ApiError(None, "BAD_RESPONSE", f"Task returned unsupported screening stage: {stage}.")
+
+    task_kind = task.get("taskKind")
+    if task_kind != "screening":
+        code = "EXTRACTION_TASK_REQUIRED" if task_kind == "extraction" else "TASK_KIND_REQUIRED"
+        raise ApiError(409, code, "This task is not explicitly identified as a screening task.")
+
+    decision = str(body.get("decision") or "").strip().upper()
+    # Preserve the Claude Science screening alias used by older drafts.
+    if stage == "TITLE_ABSTRACT" and decision == "INCLUDE":
+        decision = "ADVANCE_TO_FULL_TEXT"
+    allowed = ({"ADVANCE_TO_FULL_TEXT", "EXCLUDE", "UNCERTAIN"}
+               if stage == "TITLE_ABSTRACT" else {"INCLUDE", "EXCLUDE", "UNCERTAIN"})
+    if decision not in allowed:
+        raise ApiError(None, "VALIDATION",
+                       f"Decision {decision or '(empty)'} is not allowed for {stage}; "
+                       f"allowed: {', '.join(sorted(allowed))}.")
+    body["decision"] = decision
+
+    if stage == "FULL_TEXT":
+        paper = task_response.get("paper") or task.get("paper") or {}
+        source_status = paper.get("fullTextStatus") or task.get("fullTextStatus")
+        if source_status in {"PENDING", "PROCESSING", "PARTIAL"}:
+            raise ApiError(409, "FULLTEXT_UNAVAILABLE",
+                           f"Full-text source is {source_status}; wait for a COMPLETED source revision.")
+        if source_status in {"FAILED", "UNAVAILABLE"} and decision != "UNCERTAIN":
+            raise ApiError(None, "VALIDATION",
+                           f"Only UNCERTAIN is allowed when full-text source is {source_status}.")
+        if source_status != "COMPLETED" and source_status not in {"FAILED", "UNAVAILABLE"}:
+            raise ApiError(None, "BAD_RESPONSE",
+                           "FULL_TEXT task is missing a recognized paper.fullTextStatus.")
     return body
 
 
@@ -203,11 +287,9 @@ class Client:
                     attempt += 1
                     time.sleep(2 ** attempt)
                     continue
-                host = urllib.parse.urlparse(self.base).hostname
-                hint = (f"request a network grant for {host}." if any(k in _proxy_view() for k in ("http", "https", "all")) else
-                        "no proxy is visible to this process (HTTPS_PROXY unset) - run from the "
-                        "environment where earlier calls worked, or restart the app; see `slr.py diag`.")
-                raise ApiError(None, "NETWORK", f"{e.reason}. Egress is proxied in the sandbox: {hint}")
+                raise ApiError(None, "NETWORK",
+                               f"{e.reason}. Cannot reach {self.base}: check the backend is running and "
+                               "the URL is right; from chat use the `slr` MCP connector; see `slr.py diag`.")
 
     @staticmethod
     def _raise(status, raw, exit_code=EXIT_ERROR):
@@ -250,6 +332,14 @@ class Client:
         if status != "any":
             items = [t for t in items if t.get("status") == status]
         return project, items
+
+    def list_consensus_tasks(self, status="any"):
+        """List server-owned leader extraction tasks and provision them after R1/R2 submit."""
+        data = self._get_json("/agent/v1/extraction/consensus-tasks")
+        items = data.get("items", [])
+        if status != "any":
+            items = [task for task in items if task.get("status") == status]
+        return data.get("project"), items, data.get("readiness", [])
 
     def get_task(self, task_id):
         return self._get_json(f"/agent/v1/tasks/{urllib.parse.quote(task_id)}")
@@ -304,6 +394,114 @@ class Client:
             except ApiError:
                 completed = False
         self._raise(status, raw, EXIT_CONFLICT if status == 409 and completed else EXIT_ERROR)
+
+    def extraction_request(self, method, task_id, action, body=None):
+        path = f"/agent/v1/extraction/tasks/{urllib.parse.quote(task_id)}/{action}"
+        status, _, raw = self._request(method, path, body=body)
+        if status not in (200, 201, 202):
+            self._raise(status, raw, EXIT_CONFLICT if status == 409 else EXIT_ERROR)
+        if not raw:
+            return {}
+        payload = json.loads(raw.decode("utf-8"))
+        if not payload.get("success"):
+            raise ApiError(status, "BAD_RESPONSE", "Unexpected response envelope.")
+        return payload.get("data")
+
+    def get_extraction_consensus(self, task_id):
+        """Read the leader-only consensus comparison for one extraction task."""
+        return self.extraction_request("GET", task_id, "consensus")
+
+    @staticmethod
+    def _challenge_id(payload):
+        if isinstance(payload, dict):
+            for key in ("challengeId", "challenge_id", "challengeToken", "token"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            for key in ("challenge", "data"):
+                found = Client._challenge_id(payload.get(key))
+                if found:
+                    return found
+        return None
+
+    @staticmethod
+    def _challenge_value(payload, key):
+        if isinstance(payload, dict):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+            for nested_key in ("challenge", "data"):
+                found = Client._challenge_value(payload.get(nested_key), key)
+                if found:
+                    return found
+        return None
+
+    @staticmethod
+    def _extraction_check_status(payload):
+        if isinstance(payload, dict):
+            status = payload.get("status")
+            if status in {"PASS", "WARN", "BLOCK"}:
+                return status
+            for value in payload.values():
+                status = Client._extraction_check_status(value)
+                if status:
+                    return status
+        elif isinstance(payload, list):
+            for value in payload:
+                status = Client._extraction_check_status(value)
+                if status:
+                    return status
+        return None
+
+    def submit_extraction_proposal(self, task_id, consensus=False, proposal=None):
+        if not consensus:
+            check = self.extraction_request("POST", task_id, "check", {})
+            if self._extraction_check_status(check) == "BLOCK":
+                raise ApiError(None, "EXTRACTION_CHECK_BLOCKED",
+                               "The current extraction draft has a BLOCK check and cannot be submitted.")
+        challenge_action = "consensus-challenge" if consensus else "submit-challenge"
+        submit_action = "consensus-proposal" if consensus else "submit"
+        # The legacy leader route still uses the canonical consensus payload at
+        # the top level. Do not wrap it in {"proposal": ...}; the backend
+        # validates expectedVersion, values, and findings directly.
+        challenge_body = (proposal or {}) if consensus else {}
+        action_prefix = "mcp-consensus" if consensus else "mcp-extraction-direct-v2"
+        return self._submit_extraction_challenge(task_id, challenge_action, submit_action,
+                                                 challenge_body, action_prefix)
+
+    def _submit_extraction_challenge(self, task_id, challenge_action, submit_action,
+                                     challenge_body, action_prefix):
+        challenge = self.extraction_request("POST", task_id, challenge_action, challenge_body)
+        challenge_id = self._challenge_id(challenge)
+        if not challenge_id:
+            raise ApiError(None, "BAD_RESPONSE", "Challenge response did not include a challenge identifier.")
+        payload_digest = self._challenge_value(challenge, "payloadDigest")
+        if not payload_digest:
+            raise ApiError(None, "BAD_RESPONSE", "Challenge response did not include a payload digest.")
+        body = {
+            "challengeId": challenge_id,
+            "payloadDigest": payload_digest,
+            "idempotencyKey": f"{action_prefix}-{task_id}-{payload_digest}",
+        }
+        return self.extraction_request("POST", task_id, submit_action, body)
+
+    def save_extraction_consensus_draft(self, task_id, draft):
+        return self._submit_extraction_challenge(
+            task_id,
+            "consensus-draft-challenge",
+            "consensus-draft",
+            draft,
+            "mcp-consensus-draft-v1",
+        )
+
+    def submit_extraction_consensus(self, task_id, expected_version):
+        return self._submit_extraction_challenge(
+            task_id,
+            "consensus-submit-challenge",
+            "consensus-submit",
+            {"expectedVersion": int(expected_version)},
+            "mcp-consensus-official-v1",
+        )
 
 
 # ------------------------------------------------------------------ audit log
@@ -360,7 +558,7 @@ def cmd_diag(args):
         try:
             out["direct_dns"] = socket.gethostbyname(host)
         except OSError as e:
-            out["direct_dns"] = f"failed ({e}) - expected inside a sandbox; traffic must use the proxy"
+            out["direct_dns"] = f"failed ({e}) - DNS blocked or wrong host; from chat use the `slr` MCP connector"
     except ApiError as e:
         out["api_base_url"] = e.message
     try:
@@ -368,9 +566,9 @@ def cmd_diag(args):
         out["api_call"] = r
     except ApiError as e:
         out["api_call"] = e.as_dict()
-    if not out["proxies_seen_by_urllib"]:
-        out["hint"] = ("No proxy visible to this process. In a sandbox with no direct egress, run the "
-                       "CLI from the same environment/cell where proxy variables (HTTPS_PROXY) are set.")
+    if not (out["api_call"] or {}).get("connected"):
+        out["hint"] = ("If this shell has no network (agent sandbox), use the `slr` MCP connector's "
+                       "connection_test instead - it runs on the host.")
     _out(out)
 
 
@@ -406,13 +604,17 @@ def cmd_markdown(args):
     _out({"ok": True, "file": str(out), "chars": len(text)})
 
 
-def cmd_draft(args):
-    body = _read_args_body(args)
-    path = workdir() / "drafts" / f"{args.task_id}.json"
-    path.write_text(json.dumps({"taskId": args.task_id, "title": args.title, "body": body},
+# Library form (return dicts) — shared by the CLI below and the MCP connector's draft tools.
+
+def save_draft(task_id, body, title=""):
+    body = build_body(body.get("decision"), body.get("reasoning"), body.get("data"))
+    path = workdir() / "drafts" / f"{task_id}.json"
+    replaced = path.exists()
+    path.write_text(json.dumps({"taskId": task_id, "title": title or "", "body": body},
                                ensure_ascii=False, indent=2), encoding="utf-8")
-    log_event({"event": "draft", "taskId": args.task_id, "decision": body["decision"]})
-    _out({"ok": True, "draft": str(path), "decision": body["decision"]})
+    log_event({"event": "edit" if replaced else "draft", "taskId": task_id, "decision": body["decision"]})
+    return {"ok": True, "taskId": task_id, "draft": str(path), "decision": body["decision"],
+            "replaced": replaced}
 
 
 def _load_drafts(ids=None):
@@ -426,7 +628,16 @@ def _load_drafts(ids=None):
     return drafts
 
 
-def cmd_drafts(args):
+def get_draft(task_id):
+    for sub in ("drafts", "submitted"):
+        p = workdir() / sub / f"{task_id}.json"
+        if p.exists():
+            return {"ok": True, "state": "pending" if sub == "drafts" else "submitted",
+                    **json.loads(p.read_text(encoding="utf-8"))}
+    raise ApiError(None, "NOT_FOUND", f"No draft for task {task_id}.")
+
+
+def drafts_table():
     rows = []
     for d in _load_drafts():
         b = d["body"]
@@ -438,30 +649,33 @@ def cmd_drafts(args):
     counts = {}
     for r in rows:
         counts[r["decision"]] = counts.get(r["decision"], 0) + 1
-    _out({"ok": True, "pending": len(rows), "byDecision": counts, "drafts": rows})
+    done = sorted(p.stem for p in (workdir() / "submitted").glob("*.json"))
+    return {"ok": True, "workdir": str(workdir()), "pending": len(rows), "byDecision": counts,
+            "drafts": rows, "submittedIds": done}
 
 
-def cmd_mark_submitted(args):
-    """Record a vote that was sent by another channel (e.g. the MCP submit tool)."""
-    src = workdir() / "drafts" / f"{args.task_id}.json"
-    if args.result in ("submitted", "already_completed") and src.exists():
-        src.rename(workdir() / "submitted" / src.name)
-        moved = True
-    else:
-        moved = False
-    log_event({"event": "submit", "taskId": args.task_id, "result": args.result,
-               "via": args.via, **({"error": args.error} if args.error else {})})
-    _out({"ok": True, "taskId": args.task_id, "result": args.result, "draftMoved": moved})
+def mark_submitted(task_id, result, via="mcp", error=None):
+    """Record a vote that was sent by another channel."""
+    src = workdir() / "drafts" / f"{task_id}.json"
+    moved = result in ("submitted", "already_completed") and src.exists()
+    if moved:
+        src.replace(workdir() / "submitted" / src.name)
+    log_event({"event": "submit", "taskId": task_id, "result": result, "via": via,
+               **({"error": error} if error else {})})
+    return {"ok": True, "taskId": task_id, "result": result, "draftMoved": moved}
 
 
-def cmd_submit_drafts(args):
+def submit_drafts(ids=None):
+    """Refresh and validate each task before POST; move accepted drafts to submitted/. Stop on 401."""
     c = Client()
     results = []
-    for d in _load_drafts(set(args.ids) if args.ids else None):
+    for d in _load_drafts(set(ids) if ids else None):
         tid = d["taskId"]
         try:
-            c.submit(tid, d["body"])
-            res = {"taskId": tid, "result": "submitted", "decision": d["body"]["decision"]}
+            body = build_body(d["body"].get("decision"), d["body"].get("reasoning"), d["body"].get("data"))
+            validate_task_result(c.get_task(tid), body)
+            c.submit(tid, body)
+            res = {"taskId": tid, "result": "submitted", "decision": body["decision"]}
         except ApiError as e:
             if e.exit_code == EXIT_CONFLICT:
                 res = {"taskId": tid, "result": "already_completed"}
@@ -472,12 +686,30 @@ def cmd_submit_drafts(args):
             else:
                 res = {"taskId": tid, "result": "error", "error": e.as_dict()}
         if res["result"] != "error":
-            d["_path"].rename(workdir() / "submitted" / d["_path"].name)
+            d["_path"].replace(workdir() / "submitted" / d["_path"].name)
         log_event({"event": "submit", **res})
         results.append(res)
-    ok = all(r["result"] != "error" for r in results)
-    _out({"ok": ok, "results": results})
-    if not ok:
+    missing = sorted(set(ids or []) - {r["taskId"] for r in results})
+    return {"ok": all(r["result"] != "error" for r in results) and not missing,
+            "results": results, **({"noDraft": missing} if missing else {})}
+
+
+def cmd_draft(args):
+    _out(save_draft(args.task_id, _read_args_body(args), args.title))
+
+
+def cmd_drafts(args):
+    _out(drafts_table())
+
+
+def cmd_mark_submitted(args):
+    _out(mark_submitted(args.task_id, args.result, args.via, args.error))
+
+
+def cmd_submit_drafts(args):
+    res = submit_drafts(args.ids)
+    _out(res)
+    if not res["ok"]:
         sys.exit(EXIT_ERROR)
 
 
@@ -486,7 +718,9 @@ def cmd_submit(args):
     if args.dry_run:
         _out({"ok": True, "dryRun": True, "body": body})
         return
-    task = Client().submit(args.task_id, body)
+    client = Client()
+    validate_task_result(client.get_task(args.task_id), body)
+    task = client.submit(args.task_id, body)
     log_event({"event": "submit", "taskId": args.task_id, "result": "submitted",
                "decision": body["decision"]})
     _out({"ok": True, "task": task})
@@ -515,26 +749,23 @@ def _try_connect(profile):
         return {"connected": False, "error": e.as_dict()}
 
 
-def cmd_config_set_url(args):
+# Library form (return dicts) — shared by the CLI below and the MCP connector's config_* tools.
+
+def set_url(url, profile=None):
     conf = _read_conf()
-    prof = args.profile or conf["current"]
-    url = _normalize_url(args.url)
+    prof = profile or conf["current"]
+    url = _normalize_url(url)
     conf["profiles"].setdefault(prof, {})["api_base_url"] = url
-    if args.profile and not conf["profiles"].get(conf["current"]):
+    if profile and not conf["profiles"].get(conf["current"]):
         conf["current"] = prof
     _write_conf(conf)
-    _out({"ok": True, "profile": prof, "api_base_url": url,
-          "hint": "Grant network access to " + urllib.parse.urlparse(url).hostname})
+    return {"ok": True, "profile": prof, "api_base_url": url}
 
 
-def cmd_config_set_token(args):
+def set_token(tok, profile=None):
     conf = _read_conf()
-    prof = args.profile or conf["current"]
-    if args.stdin or not sys.stdin.isatty():
-        tok = sys.stdin.read().strip()
-    else:
-        import getpass
-        tok = getpass.getpass(f"Agent token for profile '{prof}' (input hidden): ").strip()
+    prof = profile or conf["current"]
+    tok = (tok or "").strip()
     if tok.lower().startswith("bearer "):
         tok = tok[7:].strip()
     if not tok or any(ch.isspace() for ch in tok):
@@ -552,20 +783,20 @@ def cmd_config_set_token(args):
     res = {"ok": True, "profile": prof, "token": _mask(tok)}
     if conf["profiles"][prof].get("api_base_url"):
         res.update(_try_connect(prof))
-    _out(res)
+    return res
 
 
-def cmd_config_use(args):
+def use_profile(profile):
     conf = _read_conf()
-    if args.profile not in conf["profiles"]:
-        raise ApiError(None, "CONFIG", f"Unknown profile '{args.profile}'. "
+    if profile not in conf["profiles"]:
+        raise ApiError(None, "CONFIG", f"Unknown profile '{profile}'. "
                        f"Known: {', '.join(conf['profiles']) or 'none'}")
-    conf["current"] = args.profile
+    conf["current"] = profile
     _write_conf(conf)
-    _out({"ok": True, "current": args.profile})
+    return {"ok": True, "current": profile}
 
 
-def cmd_config_show(args):
+def show_config():
     conf = _read_conf()
     cur = active_profile()
     rows = []
@@ -577,8 +808,41 @@ def cmd_config_show(args):
                      "token": _mask(tok) if tok else "missing"})
     overrides = [k for k in ("API_BASE_URL", "AGENT_TOKEN", "AGENT_TOKEN_FILE", "REVIEW_PROFILE")
                  if os.environ.get(k)]
-    _out({"ok": True, "configDir": str(_conf_dir()), "profiles": rows,
-          "envOverrides": overrides})
+    return {"ok": True, "configDir": str(_conf_dir()), "profiles": rows, "envOverrides": overrides}
+
+
+def remove_profile(profile):
+    conf = _read_conf()
+    conf["profiles"].pop(profile, None)
+    for p in (_conf_dir() / "tokens" / profile, _token_path(profile)):
+        if p.exists():
+            p.unlink()
+    if conf["current"] == profile:
+        conf["current"] = next(iter(conf["profiles"]), "default")
+    _write_conf(conf)
+    return {"ok": True, "removed": profile, "current": conf["current"]}
+
+
+def cmd_config_set_url(args):
+    _out(set_url(args.url, args.profile))
+
+
+def cmd_config_set_token(args):
+    prof = args.profile or _read_conf()["current"]
+    if args.stdin or not sys.stdin.isatty():
+        tok = sys.stdin.read()
+    else:
+        import getpass
+        tok = getpass.getpass(f"Agent token for profile '{prof}' (input hidden): ")
+    _out(set_token(tok, prof))
+
+
+def cmd_config_use(args):
+    _out(use_profile(args.profile))
+
+
+def cmd_config_show(args):
+    _out(show_config())
 
 
 def cmd_config_test(args):
@@ -590,16 +854,7 @@ def cmd_config_test(args):
 
 
 def cmd_config_remove(args):
-    conf = _read_conf()
-    prof = args.profile
-    conf["profiles"].pop(prof, None)
-    for p in (_conf_dir() / "tokens" / prof, _token_path(prof)):
-        if p.exists():
-            p.unlink()
-    if conf["current"] == prof:
-        conf["current"] = next(iter(conf["profiles"]), "default")
-    _write_conf(conf)
-    _out({"ok": True, "removed": prof, "current": conf["current"]})
+    _out(remove_profile(args.profile))
 
 
 def main():

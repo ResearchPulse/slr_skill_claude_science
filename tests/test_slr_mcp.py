@@ -11,12 +11,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MCP = ROOT / "scripts" / "slr_mcp.py"
 TOKEN = "slrp_claude_test_token_123456"
+DATA = {"basis": "title_abstract", "confidence": 0.9, "criteria": [{"id": "IC1", "text": "Relevant", "status": "met", "evidence": "abstract"}]}
 
 
 def task(task_id, stage, kind="screening", status="ASSIGNED"):
     item = {"id": task_id, "stage": stage, "taskKind": kind, "status": status,
             "paperTitle": task_id, "paper": {"title": task_id, "abstract": "abstract"}}
     if stage == "FULL_TEXT":
+        item["paper"]["fullTextStatus"] = "COMPLETED"
         item["markdownPath"] = f"/api/agent/v1/tasks/{task_id}/markdown"
     return item
 
@@ -151,9 +153,9 @@ class ClaudeMcpIntegration(unittest.TestCase):
 
     def test_stage_recommendation_alias_and_invalid_combinations(self):
         calls = (
-            ("submit_result", {"task_id": "ta1", "decision": "include", "reasoning": "ok"}),
-            ("submit_result", {"task_id": "ft", "decision": "ADVANCE_TO_FULL_TEXT", "reasoning": "bad"}),
-            ("submit_result", {"task_id": "extract", "decision": "INCLUDE", "reasoning": "bad"}),
+            ("submit_result", {"task_id": "ta1", "decision": "include", "reasoning": "ok", "data": DATA}),
+            ("submit_result", {"task_id": "ft", "decision": "ADVANCE_TO_FULL_TEXT", "reasoning": "bad", "data": DATA}),
+            ("submit_result", {"task_id": "extract", "decision": "INCLUDE", "reasoning": "bad", "data": DATA}),
         )
         alias, invalid_stage, wrong_kind = self.mcp(*calls)
         self.assertEqual(alias["structuredContent"]["decision"], "ADVANCE_TO_FULL_TEXT")
@@ -166,15 +168,15 @@ class ClaudeMcpIntegration(unittest.TestCase):
 
     def test_missing_task_kind_is_never_assumed_to_be_screening(self):
         result, = self.mcp(("submit_result", {"task_id": "unknownkind", "decision": "EXCLUDE",
-                                               "reasoning": "rationale"}),)
+                                               "reasoning": "rationale", "data": DATA}),)
         self.assertTrue(result["isError"])
         self.assertEqual(result["structuredContent"]["code"], "TASK_KIND_REQUIRED")
         self.assertEqual(FakeApi.posts, [])
 
     def test_completed_409_is_distinguished_from_inactive_stage_409(self):
         done, inactive = self.mcp(
-            ("submit_result", {"task_id": "done", "decision": "INCLUDE", "reasoning": "done"}),
-            ("submit_result", {"task_id": "inactive", "decision": "INCLUDE", "reasoning": "inactive"}))
+            ("submit_result", {"task_id": "done", "decision": "INCLUDE", "reasoning": "done", "data": DATA}),
+            ("submit_result", {"task_id": "inactive", "decision": "INCLUDE", "reasoning": "inactive", "data": DATA}))
         self.assertEqual(done["structuredContent"]["status"], "already_completed")
         self.assertTrue(inactive["isError"])
         self.assertEqual(inactive["structuredContent"]["code"], "TASK_STAGE_INACTIVE")
