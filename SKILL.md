@@ -1,7 +1,7 @@
 ---
 name: slr
-description: Systematic literature review agent using the `slr` MCP connector. Screens assigned tasks with stage-specific advisory recommendations, performs reviewer-scoped extraction, or helps a project leader compare two submitted extractions and finalize consensus after evidence/value checks and explicit approval. Also configures the API server URL and agent token. Use for /slr or when asked to process assigned review tasks.
-argument-hint: "[setup | status | list | review [N or ids] | drafts | edit ID | submit [ids] | auto [N] | config ... | mcp | help]"
+description: Systematic literature review agent using the `slr` MCP connector. Screens assigned tasks, performs reviewer-scoped extraction and Quality Assessment, or helps a project leader compare independent reviews and finalize decisions after source-bound evidence checks and explicit approval. Also configures the API server URL and agent token. Use for /slr or when asked to process assigned review tasks.
+argument-hint: "[setup | status | list | review [N or ids] | qa [list|review|check|submit|consensus|resolve|complete] | drafts | edit ID | submit [ids] | auto [N] | config ... | mcp | help]"
 ---
 
 # /slr — Systematic Literature Review agent (Claude Science)
@@ -35,6 +35,13 @@ the saved profile, and the drafts folder.
 | `save_extraction_consensus_draft` | leader-only challenged consensus draft; requires both reviewers submitted |
 | `submit_extraction_consensus` | leader-only official consensus submit; blocked by missing reviewer/conflict |
 | `finalize_extraction_consensus` | legacy leader-only proposal flow; do not use for official consensus |
+| `get_quality_context` · `list_quality_tasks` · `get_quality_strategy` | read role-scoped QA process, assignments and criteria |
+| `get_quality_source` | read Cloudinary-backed QA Markdown and source hash for exact evidence |
+| `get_quality_assessment` · `save_quality_assessment` · `check_quality_assessment` | read, save and validate a reviewer's own QA assessment |
+| `submit_quality_assessment` | reviewer-only official QA submission after explicit approval |
+| `analyze_quality_consensus` | leader-only comparison of every criterion, reviewer value and evidence |
+| `save_quality_resolution_draft` · `submit_quality_resolution` | leader recommendation draft and explicit official High/Low resolution |
+| `start_quality_phase` · `complete_quality_phase` | leader-only QA lifecycle controls |
 | `config_show` · `config_set_url` · `config_set_token` · `config_use` | profiles, URL, token |
 
 If these tools are missing, say so once and explain **MCP connector**; never try to reach the
@@ -64,6 +71,14 @@ API another way.
 | `/slr config test` | `connection_test` |
 | `/slr mcp` | `connection_test` and report. If the tools are missing, explain **MCP connector**. |
 | `/slr consensus [task_id]` | Leader-only: discover eligible consensus tasks automatically when the ID is omitted, then read the R1/R2 comparison and show the compact comparison/evidence tables. Save/submit only after explicit approval and only when no conflict remains. |
+| `/slr qa` | Show role, QA process, strategy, assignments, reviewer coverage and current paper status. |
+| `/slr qa list` | List QA papers visible to the active reviewer or project leader. |
+| `/slr qa review <paper_id>` | Reviewer: read source, score every configured criterion, attach exact quote/source-hash evidence and save a draft. |
+| `/slr qa check <paper_id>` | Reviewer: run deterministic completeness and evidence checks. |
+| `/slr qa submit <paper_id>` | Reviewer: after explicit approval, submit the checked assessment and show backend confirmation. |
+| `/slr qa consensus <paper_id>` | Leader: compare all criteria, R1/R2 values, comments, evidence and conflict reasons. |
+| `/slr qa resolve <paper_id>` | Leader: after reviewing the comparison, explicitly submit the official High/Low resolution. |
+| `/slr qa complete` | Leader: complete QA only when every eligible paper has two complete reviews and an official resolution. |
 
 Several projects: one profile each (`--profile <name>` on `config url` / `config token`,
 switch with `/slr config use <name>`). Switches and new tokens work immediately — no
@@ -394,6 +409,34 @@ server-issued `payloadDigest`; never invent or omit that digest. The legacy
 After `get_extraction_context` and `get_extraction_fulltext`, use the exact field IDs and
 template snapshot returned by the context. Save one canonical draft with this shape:
 
+When invoking the connector from a Notebook, the MCP arguments must have the wrapper below;
+never pass the draft fields alongside `task_id` at the top level:
+
+```javascript
+await host.mcp('slr', 'save_extraction_draft', {
+  task_id: '<task id>',
+  draft: {
+    templateId: '<context.assignment.templateId>',
+    templateVersion: 1,
+    sourceAssetId: '<fulltext.sourceAssetId>',
+    sourceRevision: '<fulltext.sourceRevision>',
+    sourceHash: '<fulltext.sourceHash>',
+    expectedVersion: 0,
+    values: {},
+    evidence: [],
+  },
+});
+```
+
+`task_id` belongs only to the MCP argument object. It must not be copied into `draft`, and
+`templateId`, `templateVersion`, `source*`, `expectedVersion`, `values`, and `evidence` must
+all be inside `draft`. If a flat object was assembled first, normalize it before the call:
+
+```javascript
+const { task_id, ...draft } = payload;
+await host.mcp('slr', 'save_extraction_draft', { task_id, draft });
+```
+
 ```json
 {
   "templateId": "<context.assignment.templateId>",
@@ -432,6 +475,129 @@ deterministic check return its result. Do not use the legacy `fields` list, `tem
 
 Call `check_extraction_draft` after saving. Only submit when the check is not `BLOCK`; a
 non-blocking `WARN` still requires the scientist's approval before `submit_extraction_draft`.
+
+## Quality Assessment workflow (`/slr qa`)
+
+Quality Assessment is separate from extraction consensus. The backend QA service remains the
+source of truth. Reviewer-scoped tokens can see only their assigned papers and own assessment;
+leader-scoped tokens can compare both submitted reviewer assessments and submit official
+resolutions. Never reuse extraction fields or expose peer review content to a reviewer.
+
+Role redaction is mandatory in the user-facing output: determine `profileScope`/`role` before
+rendering. For a reviewer-scoped response, never render `R1`, `R2`, `reviewer1`, `reviewer2`,
+peer reviewer ids, peer scores, peer comments, peer evidence, reviewer-comparison tables, or
+reviewer coverage that reveals the other reviewer's submission state. Show only the current
+reviewer's own task, submission, completion, values, comments, and evidence. R1/R2 comparison
+tables are leader-only and must never be inferred from an empty or generic response shape.
+
+For every QA command, render complete paper-level tables automatically, with this command-specific
+behavior:
+
+1. `/slr qa list` is a progress queue. For each paper, render a `QA overview` table retaining
+   `Project`, `Paper`, `Task ID`, `Role`, `Phase status`, `Reviewer coverage`, and `Resolution`.
+   Keep a compact status row with `Checklist`, `Comments`, and `Recommendation` when those values
+   are available. Do not invent criterion rows or evidence when the list payload has not loaded
+   reviewer details. Do not put `Reviewer detail not loaded by list command.` in a table; write
+   this sentence outside the table instead: `Review details are available through /slr qa
+   consensus after both reviewers submit.` Do not render an empty `Criteria/assessment` or
+   `Evidence` table just to satisfy the format.
+2. `/slr qa review` and `/slr qa consensus` render their actual criterion-level details. The
+   consensus table must contain `Question`, `R1 answer`, `R2 answer`, `Status`, `Recommendation`,
+   and `Reason/checks`; its evidence table must contain `Evidence quote`, `PDF page`, and
+   `Section/paragraph`, with `Reviewer` only in leader-scoped comparison output. `R1 answer` and
+   `R2 answer` must be labels only (`Yes/No/Unclear` or the localized equivalents); never append
+   numeric wire values, point scores, or forms such as `Có (1,0)`.
+3. Reviewer-scoped output must contain only the current reviewer's values and status. Do not render
+   source asset ID, source revision, source hash, quote hash, exact start/end offsets, or
+   `pdfHighlightCoordinates` in any user-facing table.
+
+The exact quote and source hash are canonical evidence. `pdfHighlightCoordinates` may be retained
+for UI compatibility but never replaces exact source evidence. A quote must be an exact bounded
+substring of the Markdown returned by `get_quality_source`; compute `quoteHash` as SHA-256 of the
+quote and use the returned `sourceHash` unchanged.
+
+Reviewer flow:
+
+1. Call `get_quality_context`, `list_quality_tasks`, `get_quality_strategy` and
+   `get_quality_source`.
+2. Score every configured criterion as `Yes`, `No`, or `Unclear`; do not invent criteria or
+   weights. The MCP payload uses the backend's numeric wire values internally, but all
+   user-facing tables must show the labels and never expose `0`, `1`, or `2` as answer codes.
+   Build and save one canonical draft with `save_quality_assessment`. The exact wrapper is:
+
+   ```javascript
+   await host.mcp('slr', 'save_quality_assessment', {
+     paper_id: '<paper id>',
+     draft: {
+       notes: '<overall reviewer note or null>',
+       decisionItems: [
+         {
+           qualityCriterionId: '<criterion.criterionId>',
+           value: 0, // 0 = Yes, 1 = No, 2 = Unclear
+           comment: '<criterion-specific rationale>',
+           pdfHighlightCoordinates: null,
+           evidence: [
+             {
+               criterionId: '<same criterion id>',
+               quote: '<exact bounded substring from get_quality_source.markdown>',
+               sourceAssetId: '<source.sourceAssetId>',
+               sourceRevision: '<source.sourceRevision>',
+               sourceHash: '<source.sourceHash>',
+               startOffset: 0,
+               endOffset: 10,
+               quoteHash: '<sha256(quote)>',
+               pdfPage: 1,
+               section: '<section or paragraph>'
+             }
+           ]
+         }
+       ]
+     }
+   });
+   ```
+
+   `decisionItems` must contain exactly one item for every criterion returned by
+   `get_quality_strategy`, using the exact `criterionId`; it must not be empty. Copy source
+   identity unchanged from `get_quality_source`, calculate zero-based character offsets against
+   that exact Markdown, and calculate `quoteHash` as SHA-256 of the exact quote. Use
+   `evidence: []` only when the criterion has no defensible source passage. Do not use the
+   extraction/legacy keys `fields`, `criteria`, `values`, or `assessment`; do not send a probe
+   payload such as `{fields: []}`. If the save call fails, fix the save payload first and do not
+   call `check_quality_assessment` as a substitute. `QA_DRAFT_NOT_FOUND` after a failed save means
+   no draft was written; it is not proof that the paper had no QA draft.
+3. Call `check_quality_assessment`. Any missing criterion, stale source, invalid quote, wrong
+   offset, or missing source metadata is `BLOCK` and must be fixed.
+4. Show the complete tables and ask for explicit approval before `submit_quality_assessment`.
+   Report only the backend-confirmed `SUBMITTED` result. A previously submitted reviewer
+   assessment is still editable by its owner: `qa review` creates/replaces a new draft and
+   `qa submit` updates that reviewer's canonical assessment after the draft passes checks.
+   Always state both `Draft status` and `Canonical assessment status` in the table. If the
+   paper is already officially resolved, the backend returns `QA_PAPER_RESOLVED`; explain that
+   the review cannot be updated until the Leader reopens the paper, and do not claim that the
+   evidence was persisted merely because the draft/check passed.
+
+Leader flow:
+
+1. Call `list_quality_tasks` and process one paper at a time. If R1 or R2 is missing or
+   incomplete, show the missing reviewer in the table and stop consensus for that paper.
+2. If a paper is already `RESOLVED` but a reviewer must correct a submitted assessment, the
+   project Leader must use the UI `Reopen` action first. Reopen removes the official resolution,
+   returns the QA phase to `InProgress` when it was completed, preserves the prior resolution in
+   the audit log, and allows the reviewer to create/submit a replacement assessment. Never edit
+   the database or claim that a reviewer update succeeded while the paper remains resolved.
+3. Call `analyze_quality_consensus`. Inspect every criterion, not only textual differences.
+   Classify the comparison as exact agreement, semantic agreement, conflict or missing. A
+   semantic agreement is an agent recommendation, not a backend shortcut; the leader must still
+   decide the official resolution.
+4. Save any recommendation with `save_quality_resolution_draft`; it is never official.
+5. After explicit leader approval, call `submit_quality_resolution` with `finalDecision: 1`
+   for High or `finalDecision: 0` for Low. The backend recomputes the final score and records
+   the audit event.
+6. Call `complete_quality_phase` only after every eligible paper has two complete reviewer
+   assessments and an official resolution. Fewer than two reviewers is always a blocking state.
+
+Never claim that QA was submitted, resolved or completed based only on a draft or recommendation;
+show the backend status and audit result returned by the connector.
 
 The installer (`npx github:ResearchPulse/slr_skill_open_science`) registers and enables a
 local custom connector named `slr` through the `open-science` CLI. If the tools are missing

@@ -503,6 +503,44 @@ class Client:
             "mcp-consensus-official-v1",
         )
 
+    def quality_request(self, method, path, body=None):
+        """Call the role-scoped Phase-3 QA agent boundary."""
+        path = "/agent/v1/quality" + path
+        status, _, raw = self._request(method, path, body=body)
+        if status not in (200, 201, 202):
+            self._raise(status, raw, EXIT_CONFLICT if status == 409 else EXIT_ERROR)
+        if not raw:
+            return {}
+        payload = json.loads(raw.decode("utf-8"))
+        if not payload.get("success"):
+            raise ApiError(status, "BAD_RESPONSE", "Unexpected response envelope.")
+        return payload.get("data")
+
+    def get_quality_source(self, paper_id):
+        return self.quality_request("GET", f"/source/{urllib.parse.quote(str(paper_id))}")
+
+    def submit_quality_assessment(self, paper_id):
+        check = self.quality_request("POST", f"/papers/{urllib.parse.quote(str(paper_id))}/assessment/check", {})
+        if check.get("status") == "BLOCK":
+            raise ApiError(409, check.get("code", "QA_ASSESSMENT_BLOCKED"), check.get("message", "QA assessment is blocked."), EXIT_CONFLICT)
+        challenge = self.quality_request("POST", f"/papers/{urllib.parse.quote(str(paper_id))}/assessment/submit-challenge", {})
+        return self.quality_request("POST", f"/papers/{urllib.parse.quote(str(paper_id))}/assessment/submit", {
+            "challengeId": challenge["challengeId"],
+            "payloadDigest": challenge["payloadDigest"],
+            "idempotencyKey": f"mcp-quality-assessment-{paper_id}-{challenge['payloadDigest']}",
+            "confirmation": True,
+        })
+
+    def submit_quality_resolution(self, paper_id, final_decision, resolution_notes=None):
+        payload = {"finalDecision": int(final_decision), "resolutionNotes": resolution_notes}
+        challenge = self.quality_request("POST", f"/papers/{urllib.parse.quote(str(paper_id))}/resolution/submit-challenge", payload)
+        return self.quality_request("POST", f"/papers/{urllib.parse.quote(str(paper_id))}/resolution", {
+            "challengeId": challenge["challengeId"],
+            "payloadDigest": challenge["payloadDigest"],
+            "idempotencyKey": f"mcp-quality-resolution-{paper_id}-{challenge['payloadDigest']}",
+            "confirmation": True,
+        })
+
 
 # ------------------------------------------------------------------ audit log
 

@@ -224,6 +224,11 @@ class McpEndToEnd(unittest.TestCase):
                                  "check_extraction_draft", "submit_extraction_draft", "finalize_extraction_consensus",
                                  "analyze_extraction_consensus", "save_extraction_consensus_draft",
                                  "submit_extraction_consensus",
+                                 "get_quality_context", "list_quality_tasks", "get_quality_strategy",
+                                 "get_quality_source", "get_quality_assessment", "save_quality_assessment",
+                                 "check_quality_assessment", "submit_quality_assessment",
+                                 "analyze_quality_consensus", "save_quality_resolution_draft",
+                                 "submit_quality_resolution", "start_quality_phase", "complete_quality_phase",
                                  "save_draft", "list_drafts", "get_draft", "submit_drafts",
                                  "config_show", "config_set_url", "config_set_token", "config_use"})
         extraction = next(t for t in tools if t["name"] == "save_extraction_draft")
@@ -391,6 +396,27 @@ class McpEndToEnd(unittest.TestCase):
             "payloadDigest": "d" * 64,
             "idempotencyKey": "mcp-consensus-t-extract-" + "d" * 64,
         })
+
+    def test_quality_assessment_draft_save_url_encodes_paper_id(self):
+        """Regression: Phase 3 QA handlers must import urllib before quoting paper ids."""
+        self.configure()
+        draft = {"notes": None, "decisionItems": [{"qualityCriterionId": "C1", "value": 1,
+                                                       "comment": "not applicable", "evidence": []}]}
+        (saved,) = self.mcp(("save_quality_assessment", {"paper_id": "paper/1", "draft": draft}),)
+        self.assertFalse(saved["isError"])
+        self.assertEqual(saved["structuredContent"]["draft"], draft)
+
+    def test_quality_assessment_rejects_legacy_or_empty_drafts_before_http(self):
+        """A malformed draft must not become the misleading QA_DRAFT_NOT_FOUND follow-up."""
+        self.configure()
+        legacy, empty = self.mcp(
+            ("save_quality_assessment", {"paper_id": "paper/1", "draft": {"fields": []}}),
+            ("save_quality_assessment", {"paper_id": "paper/1", "draft": {"decisionItems": []}}),
+        )
+        for result in (legacy, empty):
+            self.assertTrue(result["isError"])
+            self.assertEqual(result["structuredContent"]["code"], "INVALID_QA_DRAFT")
+        self.assertFalse(FakeApi.extraction_posts)
 
     def test_blocked_extraction_draft_never_challenges(self):
         self.configure()

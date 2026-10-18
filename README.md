@@ -275,3 +275,27 @@ Kết quả agent là recommendation riêng, không tạo screening decision c�
 <div align="center">
 <sub>Made for <b>ResearchPulse</b> · Phát hiện lỗi? <a href="https://github.com/ResearchPulse/slr_skill_claude_science/issues">Mở issue</a></sub>
 </div>
+
+## Phase 3 Quality Assessment (`/slr qa`)
+
+The Claude connector uses the same canonical backend Quality Assessment
+workflow as the Open-Science connector. Reviewer-scoped tokens are limited to
+the caller's assigned paper and own review; project-scoped leader tokens can
+compare both submitted reviews and submit the official resolution.
+
+| Command | Behavior |
+| --- | --- |
+| `/slr qa` | Show role, phase, strategy, assignments, and reviewer coverage |
+| `/slr qa list` | List QA papers visible to the active token |
+| `/slr qa review <paper_id>` | Read Cloudinary Markdown, score every criterion, attach exact quote/source-hash evidence, and save a draft |
+| `/slr qa check <paper_id>` | Run deterministic value, completeness, and source-binding checks |
+| `/slr qa submit <paper_id>` | Submit the reviewer's checked assessment after explicit approval |
+| `/slr qa consensus <paper_id>` | Leader-only comparison of every criterion, both reviews, checks, and evidence |
+| `/slr qa resolve <paper_id>` | Leader-only official High/Low resolution after explicit approval |
+| `/slr qa complete` | Complete QA only after every eligible paper has two valid reviews and a resolution |
+
+Exact quote, source revision, source hash, offsets, and quote hash are the
+canonical evidence. `pdfHighlightCoordinates` is retained only for UI
+compatibility. Reviewer output remains blind to the other reviewer; leader
+output always includes the complete criterion/evidence tables. Drafts and
+recommendations are never reported as official submission or completion.

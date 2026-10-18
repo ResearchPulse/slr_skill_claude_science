@@ -1,6 +1,6 @@
 {
   "name": "slr-skill",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "One-command installer for the /slr systematic literature review skill + MCP connector (Claude Code, Claude Science, Claude Desktop).",
   "bin": {
     "slr-skill": "bin/install.js"
@@ -10,7 +10,8 @@
     "scripts/*.py",
     "references/",
     "SKILL.md",
-    "README.md"
+    "README.md",
+    "AI_AGENT_TASK_API_CONTRACT.md"
   ],
   "engines": {
     "node": ">=16.7"
